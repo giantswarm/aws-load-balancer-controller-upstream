@@ -5,13 +5,14 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
-	ec2types "github.com/aws/aws-sdk-go-v2/service/ec2/types"
-	"github.com/aws/smithy-go"
 	"regexp"
 	"sort"
 	"strings"
 	"sync"
 	"time"
+
+	ec2types "github.com/aws/aws-sdk-go-v2/service/ec2/types"
+	"github.com/aws/smithy-go"
 
 	awssdk "github.com/aws/aws-sdk-go-v2/aws"
 	ec2sdk "github.com/aws/aws-sdk-go-v2/service/ec2"
@@ -52,7 +53,7 @@ const (
 // BackendSGProvider is responsible for providing backend security groups
 type BackendSGProvider interface {
 	// Get returns the backend security group to use
-	Get(ctx context.Context, resourceType ResourceType, activeResources []types.NamespacedName) (string, error)
+	Get(ctx context.Context, resourceType ResourceType, activeResources []types.NamespacedName, additionalTags map[string]string) (string, error)
 	// Release cleans up the auto-generated backend SG if necessary
 	Release(ctx context.Context, resourceType ResourceType, inactiveResources []types.NamespacedName) error
 }
@@ -120,12 +121,12 @@ type defaultBackendSGProvider struct {
 	defaultDeletionTimeout      time.Duration
 }
 
-func (p *defaultBackendSGProvider) Get(ctx context.Context, resourceType ResourceType, activeResources []types.NamespacedName) (string, error) {
+func (p *defaultBackendSGProvider) Get(ctx context.Context, resourceType ResourceType, activeResources []types.NamespacedName, additionalTags map[string]string) (string, error) {
 	if len(p.backendSG) > 0 {
 		return p.backendSG, nil
 	}
 	// Auto generate Backend Security group, and return the id
-	if err := p.allocateBackendSG(ctx, resourceType, activeResources); err != nil {
+	if err := p.allocateBackendSG(ctx, resourceType, activeResources, additionalTags); err != nil {
 		p.logger.Error(err, "Failed to auto-create backend SG")
 		return "", err
 	}
@@ -217,7 +218,7 @@ func (p *defaultBackendSGProvider) existsInObjectMap(resourceType ResourceType, 
 	return false
 }
 
-func (p *defaultBackendSGProvider) allocateBackendSG(ctx context.Context, resourceType ResourceType, activeResources []types.NamespacedName) error {
+func (p *defaultBackendSGProvider) allocateBackendSG(ctx context.Context, resourceType ResourceType, activeResources []types.NamespacedName, additionalTags map[string]string) error {
 	p.mutex.Lock()
 	defer p.mutex.Unlock()
 
@@ -241,7 +242,7 @@ func (p *defaultBackendSGProvider) allocateBackendSG(ctx context.Context, resour
 		VpcId:             awssdk.String(p.vpcID),
 		GroupName:         awssdk.String(sgName),
 		Description:       awssdk.String(sgDescription),
-		TagSpecifications: p.buildBackendSGTags(ctx),
+		TagSpecifications: p.buildBackendSGTags(ctx, additionalTags),
 	}
 	p.logger.V(1).Info("creating securityGroup", "name", sgName)
 	resp, err := p.ec2Client.CreateSecurityGroupWithContext(ctx, createReq)
@@ -253,21 +254,30 @@ func (p *defaultBackendSGProvider) allocateBackendSG(ctx context.Context, resour
 	return nil
 }
 
-func (p *defaultBackendSGProvider) buildBackendSGTags(_ context.Context) []ec2types.TagSpecification {
-	var defaultTags []ec2types.Tag
+func (p *defaultBackendSGProvider) buildBackendSGTags(_ context.Context, additionalTags map[string]string) []ec2types.TagSpecification {
+	var tags []ec2types.Tag
 	for key, val := range p.defaultTags {
-		defaultTags = append(defaultTags, ec2types.Tag{
+		tags = append(tags, ec2types.Tag{
 			Key:   awssdk.String(key),
 			Value: awssdk.String(val),
 		})
 	}
-	sort.Slice(defaultTags, func(i, j int) bool {
-		return awssdk.ToString(defaultTags[i].Key) < awssdk.ToString(defaultTags[j].Key)
+
+	for key, val := range additionalTags {
+		tags = append(tags, ec2types.Tag{
+			Key:   awssdk.String(key),
+			Value: awssdk.String(val),
+		})
+	}
+
+	sort.Slice(tags, func(i, j int) bool {
+		return awssdk.ToString(tags[i].Key) < awssdk.ToString(tags[j].Key)
 	})
+
 	return []ec2types.TagSpecification{
 		{
 			ResourceType: resourceTypeSecurityGroup,
-			Tags: append(defaultTags, []ec2types.Tag{
+			Tags: append(tags, []ec2types.Tag{
 				{
 					Key:   awssdk.String(tagKeyK8sCluster),
 					Value: awssdk.String(p.clusterName),

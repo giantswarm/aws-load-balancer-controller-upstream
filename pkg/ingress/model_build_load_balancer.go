@@ -5,12 +5,13 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"regexp"
+
 	awssdk "github.com/aws/aws-sdk-go-v2/aws"
 	ec2types "github.com/aws/aws-sdk-go-v2/service/ec2/types"
 	"github.com/google/go-cmp/cmp"
 	"github.com/pkg/errors"
 	"k8s.io/apimachinery/pkg/util/sets"
-	"regexp"
 	"sigs.k8s.io/aws-load-balancer-controller/apis/elbv2/v1beta1"
 	"sigs.k8s.io/aws-load-balancer-controller/pkg/algorithm"
 	"sigs.k8s.io/aws-load-balancer-controller/pkg/annotations"
@@ -51,7 +52,11 @@ func (t *defaultModelBuildTask) buildLoadBalancerSpec(ctx context.Context, liste
 	if err != nil {
 		return elbv2model.LoadBalancerSpec{}, err
 	}
-	securityGroups, err := t.buildLoadBalancerSecurityGroups(ctx, listenPortConfigByPort, ipAddressType)
+	tags, err := t.buildLoadBalancerTags(ctx)
+	if err != nil {
+		return elbv2model.LoadBalancerSpec{}, err
+	}
+	securityGroups, err := t.buildLoadBalancerSecurityGroups(ctx, listenPortConfigByPort, ipAddressType, tags)
 	if err != nil {
 		return elbv2model.LoadBalancerSpec{}, err
 	}
@@ -60,10 +65,6 @@ func (t *defaultModelBuildTask) buildLoadBalancerSpec(ctx context.Context, liste
 		return elbv2model.LoadBalancerSpec{}, err
 	}
 	loadBalancerAttributes, err := t.buildLoadBalancerAttributes(ctx)
-	if err != nil {
-		return elbv2model.LoadBalancerSpec{}, err
-	}
-	tags, err := t.buildLoadBalancerTags(ctx)
 	if err != nil {
 		return elbv2model.LoadBalancerSpec{}, err
 	}
@@ -276,7 +277,7 @@ func (t *defaultModelBuildTask) buildLoadBalancerSubnetMappings(ctx context.Cont
 	return buildLoadBalancerSubnetMappingsWithSubnetIDs(subnetIDs), nil
 }
 
-func (t *defaultModelBuildTask) buildLoadBalancerSecurityGroups(ctx context.Context, listenPortConfigByPort map[int32]listenPortConfig, ipAddressType elbv2model.IPAddressType) ([]core.StringToken, error) {
+func (t *defaultModelBuildTask) buildLoadBalancerSecurityGroups(ctx context.Context, listenPortConfigByPort map[int32]listenPortConfig, ipAddressType elbv2model.IPAddressType, additionalTags map[string]string) ([]core.StringToken, error) {
 	sgNameOrIDsViaAnnotation, err := t.buildFrontendSGNameOrIDsFromAnnotation(ctx)
 	if err != nil {
 		return nil, err
@@ -291,7 +292,7 @@ func (t *defaultModelBuildTask) buildLoadBalancerSecurityGroups(ctx context.Cont
 		if !t.enableBackendSG {
 			t.backendSGIDToken = managedSG.GroupID()
 		} else {
-			backendSGID, err := t.backendSGProvider.Get(ctx, networking.ResourceTypeIngress, k8s.ToSliceOfNamespacedNames(t.ingGroup.Members))
+			backendSGID, err := t.backendSGProvider.Get(ctx, networking.ResourceTypeIngress, k8s.ToSliceOfNamespacedNames(t.ingGroup.Members), additionalTags)
 			if err != nil {
 				return nil, err
 			}
@@ -317,7 +318,7 @@ func (t *defaultModelBuildTask) buildLoadBalancerSecurityGroups(ctx context.Cont
 			if !t.enableBackendSG {
 				return nil, errors.New("backendSG feature is required to manage worker node SG rules when frontendSG manually specified")
 			}
-			backendSGID, err := t.backendSGProvider.Get(ctx, networking.ResourceTypeIngress, k8s.ToSliceOfNamespacedNames(t.ingGroup.Members))
+			backendSGID, err := t.backendSGProvider.Get(ctx, networking.ResourceTypeIngress, k8s.ToSliceOfNamespacedNames(t.ingGroup.Members), additionalTags)
 			if err != nil {
 				return nil, err
 			}
