@@ -117,7 +117,8 @@ additionalLabels: {}
 enableCertManager: false
 
 # The name of the Kubernetes cluster. A non-empty value is required
-clusterName:
+# For GS clusters the clusterName is set automatically.
+clusterName: ""
 
 # cluster contains configurations specific to the kubernetes cluster
 cluster:
