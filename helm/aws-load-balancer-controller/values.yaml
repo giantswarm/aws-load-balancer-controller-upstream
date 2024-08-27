@@ -435,6 +435,9 @@ loadBalancerClass:
 # creator will disable helm default labels, so you can only add yours
 # creator: "me"
 
+verticalPodAutoscaler:
+  enabled: true
+
 global:
   podSecurityStandards:
     enforced: false
