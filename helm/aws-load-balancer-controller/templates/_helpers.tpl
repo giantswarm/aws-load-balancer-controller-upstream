@@ -47,6 +47,7 @@ Common labels
 {{- define "aws-load-balancer-controller.labels" -}}
 {{- if eq (default "helm" .Values.creator) "helm" -}}
 app.kubernetes.io/managed-by: {{ .Release.Service }}
+application.giantswarm.io/team: {{ index .Chart.Annotations "application.giantswarm.io/team" | quote }}
 helm.sh/chart: {{ include "aws-load-balancer-controller.chart" . }}
 {{- end }}
 {{ include "aws-load-balancer-controller.selectorLabels" . }}
