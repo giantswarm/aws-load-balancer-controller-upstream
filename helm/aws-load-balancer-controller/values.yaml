@@ -48,6 +48,9 @@ rbac:
 
 podSecurityContext:
   fsGroup: 65534
+  seccompProfile:
+    type: RuntimeDefault
+    runAsNonRoot: true
 
 securityContext:
   # capabilities:
@@ -56,6 +59,8 @@ securityContext:
   readOnlyRootFilesystem: true
   runAsNonRoot: true
   allowPrivilegeEscalation: false
+  seccompProfile:
+    type: RuntimeDefault
 
 # Time period for the controller pod to do a graceful shutdown
 terminationGracePeriodSeconds: 10
@@ -429,3 +434,7 @@ loadBalancerClass:
 
 # creator will disable helm default labels, so you can only add yours
 # creator: "me"
+
+global:
+  podSecurityStandards:
+    enforced: false
