@@ -5,6 +5,8 @@ version: 1.8.3
 appVersion: v2.8.3
 home: https://github.com/aws/eks-charts
 icon: https://raw.githubusercontent.com/aws/eks-charts/master/docs/logo/aws.png
+annotations:
+  application.giantswarm.io/team: phoenix
 sources:
   - https://github.com/aws/eks-charts
 maintainers:
