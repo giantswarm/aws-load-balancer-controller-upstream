@@ -385,7 +385,7 @@ objectSelector:
 
 serviceMonitor:
   # Specifies whether a service monitor should be created
-  enabled: false
+  enabled: true
   # Namespace to create the service monitor in
   namespace:
   # Labels to add to the service monitor
