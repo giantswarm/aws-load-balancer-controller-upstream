@@ -295,7 +295,7 @@ env:
 # envSecretName: aws-secret
 
 # Use envFrom to set environment variables from a Secret or ConfigMap
-envFrom: 
+envFrom:
   # valueFrom:
   #   - secretKeyRef:
   #       name: aws-load-balancer-controller
@@ -371,7 +371,7 @@ controllerConfig:
   # ALBSingleSubnet: false
 
 certDiscovery:
-  allowedCertificateAuthorityARNs: "" # empty means all CAs are in scope
+  allowedCertificateAuthorityARNs: ""  # empty means all CAs are in scope
 
 # objectSelector for webhook
 objectSelector:
