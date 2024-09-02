@@ -330,9 +330,9 @@ env:
 # envSecretName: aws-secret
 
 # Use envFrom to set environment variables from a Secret or ConfigMap
-# envFrom:
-#   - secretRef:
-#       name: my-secret
+envFrom:
+  # - secretRef:
+  #     name: my-secret
 
 # Specifies if aws-load-balancer-controller should be started in hostNetwork mode.
 # This is required if using a custom CNI where the managed control plane nodes are unable to initiate
@@ -416,7 +416,7 @@ controllerConfig:
   # ALBTargetControlAgent: false
 
 certDiscovery:
-  allowedCertificateAuthorityARNs: "" # empty means all CAs are in scope
+  allowedCertificateAuthorityARNs: ""  # empty means all CAs are in scope
 
 # objectSelector for webhook
 objectSelector:
