@@ -12,6 +12,7 @@ metadata:
     {{- include "aws-load-balancer-controller.labels" . | nindent 4 }}
 spec:
   replicas: {{ .Values.replicaCount }}
+  revisionHistoryLimit: {{ .Values.revisionHistoryLimit }}
   selector:
     matchLabels:
       {{- include "aws-load-balancer-controller.selectorLabels" . | nindent 6 }}
@@ -39,6 +40,9 @@ spec:
     {{- with .Values.imagePullSecrets }}
       imagePullSecrets:
         {{- toYaml . | nindent 8 }}
+    {{- end }}
+    {{- with .Values.runtimeClassName }}
+      runtimeClassName: {{ .Values.runtimeClassName }}
     {{- end }}
       serviceAccountName: {{ include "aws-load-balancer-controller.serviceAccountName" . }}
       volumes:
@@ -68,11 +72,13 @@ spec:
         {{- if .Values.ingressClass }}
         - --ingress-class={{ .Values.ingressClass }}
         {{- end }}
-        {{- if .Values.region }}
+        {{- $region := tpl (default "" .Values.region) . }}
+        {{- if $region }}
         - --aws-region={{ .Values.region }}
         {{- end }}
-        {{- if .Values.vpcId }}
-        - --aws-vpc-id={{ .Values.vpcId }}
+        {{- $vpcID := tpl (default "" .Values.vpcId) . }}
+        {{- if $vpcID }}
+        - --aws-vpc-id={{ $vpcID }}
         {{- end }}
         {{- if .Values.awsApiEndpoints }}
         - --aws-api-endpoints={{ .Values.awsApiEndpoints }}
@@ -109,6 +115,9 @@ spec:
         {{- end }}
         {{- if .Values.targetgroupbindingMaxExponentialBackoffDelay }}
         - --targetgroupbinding-max-exponential-backoff-delay={{ .Values.targetgroupbindingMaxExponentialBackoffDelay }}
+        {{- end }}
+        {{- if .Values.lbStabilizationMonitorInterval }}
+        - --lb-stabilization-monitor-interval={{ .Values.lbStabilizationMonitorInterval }}
         {{- end }}
         {{- if .Values.logLevel }}
         - --log-level={{ .Values.logLevel }}
@@ -161,6 +170,15 @@ spec:
         {{- if ne .Values.defaultTargetType "instance" }}
         - --default-target-type={{ .Values.defaultTargetType }}
         {{- end }}
+        {{- if .Values.serviceTargetENISGTags }}
+        - --service-target-eni-security-group-tags={{ .Values.serviceTargetENISGTags }}
+        {{- end }}
+        {{- if .Values.certDiscovery.allowedCertificateAuthorityARNs }}
+        - --allowed-certificate-authority-arns={{ .Values.certDiscovery.allowedCertificateAuthorityARNs }}
+        {{- end }}
+        {{- if .Values.loadBalancerClass }}
+        - --load-balancer-class={{ .Values.loadBalancerClass }}
+        {{- end }}
         {{- if or .Values.env .Values.envSecretName }}
         env:
         {{- if .Values.env}}
@@ -183,6 +201,10 @@ spec:
               key: access_key
               optional: true
         {{- end }}
+        {{- end }}
+        {{- if .Values.envFrom }}
+        envFrom:
+        {{- toYaml .Values.envFrom | nindent 10 }}
         {{- end }}
         securityContext:
           {{- toYaml .Values.securityContext | nindent 10 }}
@@ -207,6 +229,10 @@ spec:
           {{- toYaml .Values.resources | nindent 10 }}
         {{- with .Values.livenessProbe }}
         livenessProbe:
+          {{- toYaml . | nindent 10 }}
+        {{- end }}
+        {{- with .Values.readinessProbe }}
+        readinessProbe:
           {{- toYaml . | nindent 10 }}
         {{- end }}
       terminationGracePeriodSeconds: {{ .Values.terminationGracePeriodSeconds }}

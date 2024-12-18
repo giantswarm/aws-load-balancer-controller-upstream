@@ -1,23 +1,33 @@
 package aws
 
 import (
+	"context"
 	"fmt"
+	awsmiddleware "github.com/aws/aws-sdk-go-v2/aws/middleware"
+	"github.com/aws/aws-sdk-go-v2/aws/ratelimit"
+	"github.com/aws/aws-sdk-go-v2/aws/retry"
+	"github.com/aws/aws-sdk-go-v2/config"
+	ec2types "github.com/aws/aws-sdk-go-v2/service/ec2/types"
+	smithymiddleware "github.com/aws/smithy-go/middleware"
 	"net"
 	"os"
+	"sigs.k8s.io/aws-load-balancer-controller/pkg/aws/throttle"
+	"sigs.k8s.io/aws-load-balancer-controller/pkg/version"
 	"strings"
 
-	"github.com/aws/aws-sdk-go/aws"
-	"github.com/aws/aws-sdk-go/aws/endpoints"
-	"github.com/aws/aws-sdk-go/aws/session"
-	"github.com/aws/aws-sdk-go/service/ec2"
+	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/feature/ec2/imds"
+	"github.com/aws/aws-sdk-go-v2/service/ec2"
+	"github.com/go-logr/logr"
 	"github.com/pkg/errors"
-	"github.com/prometheus/client_golang/prometheus"
 	amerrors "k8s.io/apimachinery/pkg/util/errors"
 	epresolver "sigs.k8s.io/aws-load-balancer-controller/pkg/aws/endpoints"
-	"sigs.k8s.io/aws-load-balancer-controller/pkg/aws/metrics"
+	"sigs.k8s.io/aws-load-balancer-controller/pkg/aws/provider"
 	"sigs.k8s.io/aws-load-balancer-controller/pkg/aws/services"
-	"sigs.k8s.io/aws-load-balancer-controller/pkg/aws/throttle"
+	aws_metrics "sigs.k8s.io/aws-load-balancer-controller/pkg/metrics/aws"
 )
+
+const userAgent = "elbv2.k8s.aws"
 
 type Cloud interface {
 	// EC2 provides API to AWS EC2
@@ -49,7 +59,7 @@ type Cloud interface {
 }
 
 // NewCloud constructs new Cloud implementation.
-func NewCloud(cfg CloudConfig, metricsRegisterer prometheus.Registerer) (Cloud, error) {
+func NewCloud(cfg CloudConfig, metricsCollector *aws_metrics.Collector, logger logr.Logger, awsClientsProvider provider.AWSClientsProvider) (Cloud, error) {
 	hasIPv4 := true
 	addrs, err := net.InterfaceAddrs()
 	if err == nil {
@@ -62,17 +72,18 @@ func NewCloud(cfg CloudConfig, metricsRegisterer prometheus.Registerer) (Cloud, 
 			}
 		}
 	}
-
-	endpointsResolver := epresolver.NewResolver(cfg.AWSEndpoints)
-	metadataCFG := aws.NewConfig().WithEndpointResolver(endpointsResolver)
-	opts := session.Options{}
-	opts.Config.MergeIn(metadataCFG)
+	var ec2IMDSEndpointMode imds.EndpointModeState
 	if !hasIPv4 {
-		opts.EC2IMDSEndpointMode = endpoints.EC2IMDSEndpointModeStateIPv6
+		ec2IMDSEndpointMode = imds.EndpointModeStateIPv6
+	} else {
+		ec2IMDSEndpointMode = imds.EndpointModeStateIPv4
 	}
-
-	metadataSess := session.Must(session.NewSessionWithOptions(opts))
-	metadata := services.NewEC2Metadata(metadataSess)
+	endpointsResolver := epresolver.NewResolver(cfg.AWSEndpoints)
+	ec2MetadataCfg, err := config.LoadDefaultConfig(context.TODO(),
+		config.WithRetryMaxAttempts(cfg.MaxRetries),
+		config.WithEC2IMDSEndpointMode(ec2IMDSEndpointMode),
+	)
+	ec2Metadata := services.NewEC2Metadata(ec2MetadataCfg, endpointsResolver)
 
 	if len(cfg.Region) == 0 {
 		region := os.Getenv("AWS_DEFAULT_REGION")
@@ -82,59 +93,80 @@ func NewCloud(cfg CloudConfig, metricsRegisterer prometheus.Registerer) (Cloud, 
 
 		if region == "" {
 			err := (error)(nil)
-			region, err = metadata.Region()
+			region, err = ec2Metadata.Region()
 			if err != nil {
 				return nil, errors.Wrap(err, "failed to introspect region from EC2Metadata, specify --aws-region instead if EC2Metadata is unavailable")
 			}
 		}
 		cfg.Region = region
 	}
-	awsCFG := aws.NewConfig().WithRegion(cfg.Region).WithSTSRegionalEndpoint(endpoints.RegionalSTSEndpoint).WithMaxRetries(cfg.MaxRetries).WithEndpointResolver(endpointsResolver)
-	opts = session.Options{}
-	opts.Config.MergeIn(awsCFG)
-	if !hasIPv4 {
-		opts.EC2IMDSEndpointMode = endpoints.EC2IMDSEndpointModeStateIPv6
-	}
-	sess := session.Must(session.NewSessionWithOptions(opts))
-	injectUserAgent(&sess.Handlers)
+	awsConfig, err := config.LoadDefaultConfig(context.TODO(),
+		config.WithRegion(cfg.Region),
+		config.WithRetryer(func() aws.Retryer {
+			return retry.NewStandard(func(o *retry.StandardOptions) {
+				o.RateLimiter = ratelimit.None
+				o.MaxAttempts = cfg.MaxRetries
+			})
+		}),
+		config.WithEC2IMDSEndpointMode(ec2IMDSEndpointMode),
+		config.WithAPIOptions([]func(stack *smithymiddleware.Stack) error{
+			awsmiddleware.AddUserAgentKeyValue(userAgent, version.GitVersion),
+		}),
+	)
 
 	if cfg.ThrottleConfig != nil {
 		throttler := throttle.NewThrottler(cfg.ThrottleConfig)
-		throttler.InjectHandlers(&sess.Handlers)
+		awsConfig.APIOptions = append(awsConfig.APIOptions, func(stack *smithymiddleware.Stack) error {
+			return throttle.WithSDKRequestThrottleMiddleware(throttler)(stack)
+		})
 	}
-	if metricsRegisterer != nil {
-		metricsCollector, err := metrics.NewCollector(metricsRegisterer)
+
+	if metricsCollector != nil {
+		awsConfig.APIOptions = aws_metrics.WithSDKMetricCollector(metricsCollector, awsConfig.APIOptions)
+	}
+
+	if awsClientsProvider == nil {
+		var err error
+		awsClientsProvider, err = provider.NewDefaultAWSClientsProvider(awsConfig, endpointsResolver)
 		if err != nil {
-			return nil, errors.Wrapf(err, "failed to initialize sdk metrics collector")
+			return nil, errors.Wrap(err, "failed to create aws clients provider")
 		}
-		metricsCollector.InjectHandlers(&sess.Handlers)
 	}
+	ec2Service := services.NewEC2(awsClientsProvider)
 
-	ec2Service := services.NewEC2(sess)
-
-	if len(cfg.VpcID) == 0 {
-		vpcID, err := inferVPCID(metadata, ec2Service)
-		if err != nil {
-			return nil, errors.Wrap(err, "failed to introspect vpcID from EC2Metadata or Node name, specify --aws-vpc-id instead if EC2Metadata is unavailable")
-		}
-		cfg.VpcID = vpcID
+	vpcID, err := getVpcID(cfg, ec2Service, ec2Metadata, logger)
+	if err != nil {
+		return nil, errors.Wrap(err, "failed to get VPC ID")
 	}
-
+	cfg.VpcID = vpcID
 	return &defaultCloud{
 		cfg:         cfg,
 		ec2:         ec2Service,
-		elbv2:       services.NewELBV2(sess),
-		acm:         services.NewACM(sess),
-		wafv2:       services.NewWAFv2(sess),
-		wafRegional: services.NewWAFRegional(sess, cfg.Region),
-		shield:      services.NewShield(sess),
-		rgt:         services.NewRGT(sess),
+		elbv2:       services.NewELBV2(awsClientsProvider),
+		acm:         services.NewACM(awsClientsProvider),
+		wafv2:       services.NewWAFv2(awsClientsProvider),
+		wafRegional: services.NewWAFRegional(awsClientsProvider, cfg.Region),
+		shield:      services.NewShield(awsClientsProvider),
+		rgt:         services.NewRGT(awsClientsProvider),
 	}, nil
 }
 
-func inferVPCID(metadata services.EC2Metadata, ec2Service services.EC2) (string, error) {
+func getVpcID(cfg CloudConfig, ec2Service services.EC2, ec2Metadata services.EC2Metadata, logger logr.Logger) (string, error) {
+	if cfg.VpcID != "" {
+		logger.V(1).Info("vpcid is specified using flag --aws-vpc-id, controller will use the value", "vpc: ", cfg.VpcID)
+		return cfg.VpcID, nil
+	}
+
+	if cfg.VpcTags != nil {
+		return inferVPCIDFromTags(ec2Service, cfg.VpcNameTagKey, cfg.VpcTags[cfg.VpcNameTagKey])
+	}
+
+	return inferVPCID(ec2Metadata, ec2Service)
+}
+
+func inferVPCID(ec2Metadata services.EC2Metadata, ec2Service services.EC2) (string, error) {
 	var errList []error
-	vpcId, err := metadata.VpcID()
+	vpcId, err := ec2Metadata.VpcID()
 	if err == nil {
 		return vpcId, nil
 	} else {
@@ -143,8 +175,8 @@ func inferVPCID(metadata services.EC2Metadata, ec2Service services.EC2) (string,
 
 	nodeName := os.Getenv("NODENAME")
 	if strings.HasPrefix(nodeName, "i-") {
-		output, err := ec2Service.DescribeInstances(&ec2.DescribeInstancesInput{
-			InstanceIds: []*string{&nodeName},
+		output, err := ec2Service.DescribeInstancesWithContext(context.Background(), &ec2.DescribeInstancesInput{
+			InstanceIds: []string{nodeName},
 		})
 		if err != nil {
 			errList = append(errList, errors.Wrapf(err, "failed to describe instance %q", nodeName))
@@ -168,14 +200,35 @@ func inferVPCID(metadata services.EC2Metadata, ec2Service services.EC2) (string,
 	return "", amerrors.NewAggregate(errList)
 }
 
+func inferVPCIDFromTags(ec2Service services.EC2, VpcNameTagKey string, VpcNameTagValue string) (string, error) {
+	vpcs, err := ec2Service.DescribeVPCsAsList(context.Background(), &ec2.DescribeVpcsInput{
+		Filters: []ec2types.Filter{
+			{
+				Name:   aws.String("tag:" + VpcNameTagKey),
+				Values: []string{VpcNameTagValue},
+			},
+		},
+	})
+	if err != nil {
+		return "", fmt.Errorf("failed to fetch VPC ID with tag: %w", err)
+	}
+	if len(vpcs) == 0 {
+		return "", fmt.Errorf("no VPC exists with tag: %w", err)
+	}
+	if len(vpcs) > 1 {
+		return "", fmt.Errorf("multiple VPCs exists with tag: %w", err)
+	}
+
+	return *vpcs[0].VpcId, nil
+}
+
 var _ Cloud = &defaultCloud{}
 
 type defaultCloud struct {
 	cfg CloudConfig
 
-	ec2   services.EC2
-	elbv2 services.ELBV2
-
+	ec2         services.EC2
+	elbv2       services.ELBV2
 	acm         services.ACM
 	wafv2       services.WAFv2
 	wafRegional services.WAFRegional

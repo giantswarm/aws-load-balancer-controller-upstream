@@ -4,7 +4,7 @@ import (
 	"context"
 	"testing"
 
-	awssdk "github.com/aws/aws-sdk-go/aws"
+	awssdk "github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/google/go-cmp/cmp"
 	"github.com/pkg/errors"
 	"github.com/stretchr/testify/assert"
@@ -628,7 +628,7 @@ func Test_defaultEnhancedBackendBuilder_Build(t *testing.T) {
 			ctx := context.Background()
 			k8sSchema := runtime.NewScheme()
 			clientgoscheme.AddToScheme(k8sSchema)
-			k8sClient := testclient.NewFakeClientWithScheme(k8sSchema)
+			k8sClient := testclient.NewClientBuilder().WithScheme(k8sSchema).Build()
 			for _, svc := range tt.env.svcs {
 				assert.NoError(t, k8sClient.Create(ctx, svc.DeepCopy()))
 			}
@@ -1063,21 +1063,21 @@ func Test_defaultEnhancedBackendBuilder_buildActionViaAnnotation(t *testing.T) {
 						{
 							ServiceName: awssdk.String("service-1"),
 							ServicePort: &portHTTP,
-							Weight:      awssdk.Int64(20),
+							Weight:      awssdk.Int32(20),
 						},
 						{
 							ServiceName: awssdk.String("service-2"),
 							ServicePort: &port80,
-							Weight:      awssdk.Int64(20),
+							Weight:      awssdk.Int32(20),
 						},
 						{
 							TargetGroupARN: awssdk.String("tg-arn"),
-							Weight:         awssdk.Int64(60),
+							Weight:         awssdk.Int32(60),
 						},
 					},
 					TargetGroupStickinessConfig: &TargetGroupStickinessConfig{
 						Enabled:         awssdk.Bool(true),
-						DurationSeconds: awssdk.Int64(200),
+						DurationSeconds: awssdk.Int32(200),
 					},
 				},
 			},
@@ -1097,21 +1097,21 @@ func Test_defaultEnhancedBackendBuilder_buildActionViaAnnotation(t *testing.T) {
 						{
 							ServiceName: awssdk.String("service-1"),
 							ServicePort: &portHTTP,
-							Weight:      awssdk.Int64(20),
+							Weight:      awssdk.Int32(20),
 						},
 						{
 							ServiceName: awssdk.String("service-2"),
 							ServicePort: &port80,
-							Weight:      awssdk.Int64(20),
+							Weight:      awssdk.Int32(20),
 						},
 						{
 							TargetGroupARN: awssdk.String("tg-arn"),
-							Weight:         awssdk.Int64(60),
+							Weight:         awssdk.Int32(60),
 						},
 					},
 					TargetGroupStickinessConfig: &TargetGroupStickinessConfig{
 						Enabled:         awssdk.Bool(true),
-						DurationSeconds: awssdk.Int64(200),
+						DurationSeconds: awssdk.Int32(200),
 					},
 				},
 			},
@@ -1131,12 +1131,12 @@ func Test_defaultEnhancedBackendBuilder_buildActionViaAnnotation(t *testing.T) {
 						{
 							ServiceName: awssdk.String("service-1"),
 							ServicePort: &port80,
-							Weight:      awssdk.Int64(40),
+							Weight:      awssdk.Int32(40),
 						},
 						{
 							ServiceName: awssdk.String("service-2"),
 							ServicePort: &port443,
-							Weight:      awssdk.Int64(60),
+							Weight:      awssdk.Int32(60),
 						},
 					},
 				},
@@ -1598,7 +1598,7 @@ func Test_defaultEnhancedBackendBuilder_loadBackendServices(t *testing.T) {
 			ctx := context.Background()
 			k8sSchema := runtime.NewScheme()
 			clientgoscheme.AddToScheme(k8sSchema)
-			k8sClient := testclient.NewFakeClientWithScheme(k8sSchema)
+			k8sClient := testclient.NewClientBuilder().WithScheme(k8sSchema).Build()
 			for _, svc := range tt.env.svcs {
 				assert.NoError(t, k8sClient.Create(ctx, svc.DeepCopy()))
 			}

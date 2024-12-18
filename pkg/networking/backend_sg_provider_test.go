@@ -5,6 +5,8 @@ import (
 	"reflect"
 	"testing"
 
+	ec2types "github.com/aws/aws-sdk-go-v2/service/ec2/types"
+	"github.com/aws/smithy-go"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/aws-load-balancer-controller/pkg/k8s"
 
@@ -15,9 +17,8 @@ import (
 	mock_client "sigs.k8s.io/aws-load-balancer-controller/mocks/controller-runtime/client"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	awssdk "github.com/aws/aws-sdk-go/aws"
-	"github.com/aws/aws-sdk-go/aws/awserr"
-	ec2sdk "github.com/aws/aws-sdk-go/service/ec2"
+	awssdk "github.com/aws/aws-sdk-go-v2/aws"
+	ec2sdk "github.com/aws/aws-sdk-go-v2/service/ec2"
 	"github.com/golang/mock/gomock"
 	"github.com/pkg/errors"
 	"github.com/stretchr/testify/assert"
@@ -33,7 +34,7 @@ const (
 func Test_defaultBackendSGProvider_Get(t *testing.T) {
 	type describeSecurityGroupsAsListCall struct {
 		req  *ec2sdk.DescribeSecurityGroupsInput
-		resp []*ec2sdk.SecurityGroup
+		resp []ec2types.SecurityGroup
 		err  error
 	}
 	type createSecurityGroupWithContexCall struct {
@@ -49,18 +50,18 @@ func Test_defaultBackendSGProvider_Get(t *testing.T) {
 		describeSGCalls []describeSecurityGroupsAsListCall
 		createSGCalls   []createSecurityGroupWithContexCall
 	}
-	defaultEC2Filters := []*ec2sdk.Filter{
+	defaultEC2Filters := []ec2types.Filter{
 		{
 			Name:   awssdk.String("vpc-id"),
-			Values: awssdk.StringSlice([]string{defaultVPCID}),
+			Values: []string{defaultVPCID},
 		},
 		{
 			Name:   awssdk.String("tag:elbv2.k8s.aws/cluster"),
-			Values: awssdk.StringSlice([]string{"testCluster"}),
+			Values: []string{"testCluster"},
 		},
 		{
 			Name:   awssdk.String("tag:elbv2.k8s.aws/resource"),
-			Values: awssdk.StringSlice([]string{"backend-sg"}),
+			Values: []string{"backend-sg"},
 		},
 	}
 	ing := &networking.Ingress{
@@ -103,7 +104,7 @@ func Test_defaultBackendSGProvider_Get(t *testing.T) {
 						req: &ec2sdk.DescribeSecurityGroupsInput{
 							Filters: defaultEC2Filters,
 						},
-						resp: []*ec2sdk.SecurityGroup{
+						resp: []ec2types.SecurityGroup{
 							{
 								GroupId: awssdk.String("sg-autogen"),
 							},
@@ -122,7 +123,7 @@ func Test_defaultBackendSGProvider_Get(t *testing.T) {
 						req: &ec2sdk.DescribeSecurityGroupsInput{
 							Filters: defaultEC2Filters,
 						},
-						err: awserr.New("InvalidGroup.NotFound", "", nil),
+						err: &smithy.GenericAPIError{Code: "InvalidGroup.NotFound", Message: ""},
 					},
 				},
 				createSGCalls: []createSecurityGroupWithContexCall{
@@ -130,10 +131,10 @@ func Test_defaultBackendSGProvider_Get(t *testing.T) {
 						req: &ec2sdk.CreateSecurityGroupInput{
 							Description: awssdk.String(sgDescription),
 							GroupName:   awssdk.String("k8s-traffic-testCluster-411a1bcdb1"),
-							TagSpecifications: []*ec2sdk.TagSpecification{
+							TagSpecifications: []ec2types.TagSpecification{
 								{
-									ResourceType: awssdk.String("security-group"),
-									Tags: []*ec2sdk.Tag{
+									ResourceType: ec2types.ResourceType("security-group"),
+									Tags: []ec2types.Tag{
 										{
 											Key:   awssdk.String("elbv2.k8s.aws/cluster"),
 											Value: awssdk.String(defaultClusterName),
@@ -164,7 +165,7 @@ func Test_defaultBackendSGProvider_Get(t *testing.T) {
 						req: &ec2sdk.DescribeSecurityGroupsInput{
 							Filters: defaultEC2Filters,
 						},
-						err: awserr.New("InvalidGroup.NotFound", "", nil),
+						err: &smithy.GenericAPIError{Code: "InvalidGroup.NotFound", Message: ""},
 					},
 				},
 				createSGCalls: []createSecurityGroupWithContexCall{
@@ -172,10 +173,10 @@ func Test_defaultBackendSGProvider_Get(t *testing.T) {
 						req: &ec2sdk.CreateSecurityGroupInput{
 							Description: awssdk.String(sgDescription),
 							GroupName:   awssdk.String("k8s-traffic-testCluster-411a1bcdb1"),
-							TagSpecifications: []*ec2sdk.TagSpecification{
+							TagSpecifications: []ec2types.TagSpecification{
 								{
-									ResourceType: awssdk.String("security-group"),
-									Tags: []*ec2sdk.Tag{
+									ResourceType: ec2types.ResourceType("security-group"),
+									Tags: []ec2types.Tag{
 										{
 											Key:   awssdk.String("KubernetesCluster"),
 											Value: awssdk.String(defaultClusterName),
@@ -223,12 +224,12 @@ func Test_defaultBackendSGProvider_Get(t *testing.T) {
 						req: &ec2sdk.DescribeSecurityGroupsInput{
 							Filters: defaultEC2Filters,
 						},
-						err: awserr.New("Some.Other.Error", "describe security group as list error", nil),
+						err: &smithy.GenericAPIError{Code: "Some.Other.Error", Message: "describe security group as list error"},
 					},
 				},
 				ingResources: []*networking.Ingress{ing},
 			},
-			wantErr: errors.New("Some.Other.Error: describe security group as list error"),
+			wantErr: errors.New("api error Some.Other.Error: describe security group as list error"),
 		},
 		{
 			name: "create SG call returns error",
@@ -238,7 +239,7 @@ func Test_defaultBackendSGProvider_Get(t *testing.T) {
 						req: &ec2sdk.DescribeSecurityGroupsInput{
 							Filters: defaultEC2Filters,
 						},
-						err: awserr.New("InvalidGroup.NotFound", "", nil),
+						err: &smithy.GenericAPIError{Code: "InvalidGroup.NotFound", Message: ""},
 					},
 				},
 				createSGCalls: []createSecurityGroupWithContexCall{
@@ -246,10 +247,10 @@ func Test_defaultBackendSGProvider_Get(t *testing.T) {
 						req: &ec2sdk.CreateSecurityGroupInput{
 							Description: awssdk.String(sgDescription),
 							GroupName:   awssdk.String("k8s-traffic-testCluster-411a1bcdb1"),
-							TagSpecifications: []*ec2sdk.TagSpecification{
+							TagSpecifications: []ec2types.TagSpecification{
 								{
-									ResourceType: awssdk.String("security-group"),
-									Tags: []*ec2sdk.Tag{
+									ResourceType: ec2types.ResourceType("security-group"),
+									Tags: []ec2types.Tag{
 										{
 											Key:   awssdk.String("elbv2.k8s.aws/cluster"),
 											Value: awssdk.String(defaultClusterName),
@@ -263,12 +264,12 @@ func Test_defaultBackendSGProvider_Get(t *testing.T) {
 							},
 							VpcId: awssdk.String(defaultVPCID),
 						},
-						err: awserr.New("Create.Error", "unable to create security group", nil),
+						err: &smithy.GenericAPIError{Code: "Create.Error", Message: "unable to create security group"},
 					},
 				},
 				ingResources: []*networking.Ingress{ing1},
 			},
-			wantErr: errors.New("Create.Error: unable to create security group"),
+			wantErr: errors.New("api error Create.Error: unable to create security group"),
 		},
 	}
 	for _, tt := range tests {
@@ -660,7 +661,7 @@ func Test_defaultBackendSGProvider_Release(t *testing.T) {
 						req: &ec2sdk.DeleteSecurityGroupInput{
 							GroupId: awssdk.String("sg-autogen"),
 						},
-						err: awserr.New("DependencyViolation", "", nil),
+						err: &smithy.GenericAPIError{Code: "DependencyViolation", Message: ""},
 					},
 					{
 						req: &ec2sdk.DeleteSecurityGroupInput{
@@ -687,12 +688,12 @@ func Test_defaultBackendSGProvider_Release(t *testing.T) {
 						req: &ec2sdk.DeleteSecurityGroupInput{
 							GroupId: awssdk.String("sg-autogen"),
 						},
-						err: awserr.New("Something.Else", "unable to delete SG", nil),
+						err: &smithy.GenericAPIError{Code: "Something.Else", Message: "unable to delete SG"},
 					},
 				},
 				inactiveIngresses: []*networking.Ingress{ing},
 			},
-			wantErr: errors.New("failed to delete securityGroup: Something.Else: unable to delete SG"),
+			wantErr: errors.New("failed to delete securityGroup: api error Something.Else: unable to delete SG"),
 		},
 		{
 			name: "k8s ingress list returns error",

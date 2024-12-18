@@ -35,6 +35,8 @@ nav:
         - NLB TLS Termination: guide/use_cases/nlb_tls_termination/index.md
         - Externally Managed Load Balancer: guide/use_cases/self_managed_lb/index.md
         - Frontend Security Groups: guide/use_cases/frontend_sg/index.md
+        - Blue/Green: guide/use_cases/blue_green/index.md
+        - MultiCluster Target Groups: guide/use_cases/multi_cluster/index.md
   - Examples:
     - EchoServer: examples/echo_server.md
     - gRPCServer: examples/grpc_server.md
@@ -69,8 +71,8 @@ markdown_extensions:
   - pymdownx.superfences
   - pymdownx.tabbed
   - pymdownx.emoji:
-      emoji_index: !!python/name:materialx.emoji.twemoji
-      emoji_generator: !!python/name:materialx.emoji.to_svg
+      emoji_index: !!python/name:material.extensions.emoji.twemoji
+      emoji_generator: !!python/name:material.extensions.emoji.to_svg
   - toc:
       permalink: true
 extra_css:

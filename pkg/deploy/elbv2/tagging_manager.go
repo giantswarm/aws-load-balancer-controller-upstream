@@ -2,10 +2,16 @@ package elbv2
 
 import (
 	"context"
+	elbv2types "github.com/aws/aws-sdk-go-v2/service/elasticloadbalancingv2/types"
+	"sync"
+	"time"
 
-	awssdk "github.com/aws/aws-sdk-go/aws"
-	elbv2sdk "github.com/aws/aws-sdk-go/service/elbv2"
-	"github.com/aws/aws-sdk-go/service/resourcegroupstaggingapi"
+	"k8s.io/apimachinery/pkg/util/cache"
+
+	awssdk "github.com/aws/aws-sdk-go-v2/aws"
+	elbv2sdk "github.com/aws/aws-sdk-go-v2/service/elasticloadbalancingv2"
+	rgtsdk "github.com/aws/aws-sdk-go-v2/service/resourcegroupstaggingapi"
+	rgttypes "github.com/aws/aws-sdk-go-v2/service/resourcegroupstaggingapi/types"
 	"github.com/go-logr/logr"
 	"github.com/pkg/errors"
 	"k8s.io/apimachinery/pkg/util/sets"
@@ -18,29 +24,31 @@ import (
 const (
 	// ELBV2 API supports up to 20 resource per DescribeTags API call.
 	defaultDescribeTagsChunkSize = 20
+	// cache ttl for tags on ELB resources.
+	defaultResourceTagsCacheTTL = 20 * time.Minute
 )
 
 // LoadBalancer with it's tags.
 type LoadBalancerWithTags struct {
-	LoadBalancer *elbv2sdk.LoadBalancer
+	LoadBalancer *elbv2types.LoadBalancer
 	Tags         map[string]string
 }
 
 // TargetGroup with it's tags.
 type TargetGroupWithTags struct {
-	TargetGroup *elbv2sdk.TargetGroup
+	TargetGroup *elbv2types.TargetGroup
 	Tags        map[string]string
 }
 
 // Listener with it's tags.
 type ListenerWithTags struct {
-	Listener *elbv2sdk.Listener
+	Listener *elbv2types.Listener
 	Tags     map[string]string
 }
 
 // ListenerRule with tags
 type ListenerRuleWithTags struct {
-	ListenerRule *elbv2sdk.Rule
+	ListenerRule *elbv2types.Rule
 	Tags         map[string]string
 }
 
@@ -103,6 +111,8 @@ func NewDefaultTaggingManager(elbv2Client services.ELBV2, vpcID string, featureG
 		featureGates:          featureGates,
 		logger:                logger,
 		describeTagsChunkSize: defaultDescribeTagsChunkSize,
+		resourceTagsCache:     cache.NewExpiring(),
+		resourceTagsCacheTTL:  defaultResourceTagsCacheTTL,
 		rgt:                   rgt,
 	}
 }
@@ -117,7 +127,11 @@ type defaultTaggingManager struct {
 	featureGates          config.FeatureGates
 	logger                logr.Logger
 	describeTagsChunkSize int
-	rgt                   services.RGT
+	// cache for tags on ELB resources.
+	resourceTagsCache      *cache.Expiring
+	resourceTagsCacheTTL   time.Duration
+	resourceTagsCacheMutex sync.RWMutex
+	rgt                    services.RGT
 }
 
 func (m *defaultTaggingManager) ReconcileTags(ctx context.Context, arn string, desiredTags map[string]string, opts ...ReconcileTagsOption) error {
@@ -128,7 +142,7 @@ func (m *defaultTaggingManager) ReconcileTags(ctx context.Context, arn string, d
 	reconcileOpts.ApplyOptions(opts)
 	currentTags := reconcileOpts.CurrentTags
 	if currentTags == nil {
-		tagsByARN, err := m.describeResourceTagsNative(ctx, []string{arn})
+		tagsByARN, err := m.describeResourceTags(ctx, []string{arn})
 		if err != nil {
 			return err
 		}
@@ -143,7 +157,7 @@ func (m *defaultTaggingManager) ReconcileTags(ctx context.Context, arn string, d
 
 	if len(tagsToUpdate) > 0 {
 		req := &elbv2sdk.AddTagsInput{
-			ResourceArns: []*string{awssdk.String(arn)},
+			ResourceArns: []string{arn},
 			Tags:         convertTagsToSDKTags(tagsToUpdate),
 		}
 
@@ -153,6 +167,7 @@ func (m *defaultTaggingManager) ReconcileTags(ctx context.Context, arn string, d
 		if _, err := m.elbv2Client.AddTagsWithContext(ctx, req); err != nil {
 			return err
 		}
+		m.invalidateResourceTagsCache(arn)
 		m.logger.Info("added resource tags",
 			"arn", arn)
 	}
@@ -160,8 +175,8 @@ func (m *defaultTaggingManager) ReconcileTags(ctx context.Context, arn string, d
 	if len(tagsToRemove) > 0 {
 		tagKeys := sets.StringKeySet(tagsToRemove).List()
 		req := &elbv2sdk.RemoveTagsInput{
-			ResourceArns: []*string{awssdk.String(arn)},
-			TagKeys:      awssdk.StringSlice(tagKeys),
+			ResourceArns: []string{arn},
+			TagKeys:      tagKeys,
 		}
 
 		m.logger.Info("removing resource tags",
@@ -170,6 +185,7 @@ func (m *defaultTaggingManager) ReconcileTags(ctx context.Context, arn string, d
 		if _, err := m.elbv2Client.RemoveTagsWithContext(ctx, req); err != nil {
 			return err
 		}
+		m.invalidateResourceTagsCache(arn)
 		m.logger.Info("removed resource tags",
 			"arn", arn)
 	}
@@ -185,15 +201,15 @@ func (m *defaultTaggingManager) ListListeners(ctx context.Context, lbARN string)
 		return nil, err
 	}
 	lsARNs := make([]string, 0, len(listeners))
-	lsByARN := make(map[string]*elbv2sdk.Listener, len(listeners))
+	lsByARN := make(map[string]*elbv2types.Listener, len(listeners))
 	for _, listener := range listeners {
-		lsARN := awssdk.StringValue(listener.ListenerArn)
+		lsARN := awssdk.ToString(listener.ListenerArn)
 		lsARNs = append(lsARNs, lsARN)
-		lsByARN[lsARN] = listener
+		lsByARN[lsARN] = &listener
 	}
 	var tagsByARN map[string]map[string]string
 	if m.featureGates.Enabled(config.ListenerRulesTagging) {
-		tagsByARN, err = m.describeResourceTagsNative(ctx, lsARNs)
+		tagsByARN, err = m.describeResourceTags(ctx, lsARNs)
 		if err != nil {
 			return nil, err
 		}
@@ -218,15 +234,15 @@ func (m *defaultTaggingManager) ListListenerRules(ctx context.Context, lsARN str
 		return nil, err
 	}
 	lrARNs := make([]string, 0, len(rules))
-	lrByARN := make(map[string]*elbv2sdk.Rule, len(rules))
+	lrByARN := make(map[string]*elbv2types.Rule, len(rules))
 	for _, rule := range rules {
-		lrARN := awssdk.StringValue(rule.RuleArn)
+		lrARN := awssdk.ToString(rule.RuleArn)
 		lrARNs = append(lrARNs, lrARN)
-		lrByARN[lrARN] = rule
+		lrByARN[lrARN] = &rule
 	}
 	var tagsByARN map[string]map[string]string
 	if m.featureGates.Enabled(config.ListenerRulesTagging) {
-		tagsByARN, err = m.describeResourceTagsNative(ctx, lrARNs)
+		tagsByARN, err = m.describeResourceTags(ctx, lrARNs)
 		if err != nil {
 			return nil, err
 		}
@@ -242,8 +258,10 @@ func (m *defaultTaggingManager) ListListenerRules(ctx context.Context, lsARN str
 	return sdkLRs, err
 }
 
+// TODO: we can refactor this by store provisioned LB's ARN as annotations on Ingress/Service, thus avoid this heavy lookup calls when RGT is not available.
 func (m *defaultTaggingManager) ListLoadBalancers(ctx context.Context, tagFilters ...tracking.TagFilter) ([]LoadBalancerWithTags, error) {
 	if m.featureGates.Enabled(config.EnableRGTAPI) {
+		m.logger.V(1).Info("ResourceGroupTagging enabled, list the load balancers via RGT API")
 		return m.listLoadBalancersRGT(ctx, tagFilters)
 	}
 	return m.listLoadBalancersNative(ctx, tagFilters)
@@ -251,34 +269,34 @@ func (m *defaultTaggingManager) ListLoadBalancers(ctx context.Context, tagFilter
 
 func (m *defaultTaggingManager) ListTargetGroups(ctx context.Context, tagFilters ...tracking.TagFilter) ([]TargetGroupWithTags, error) {
 	if m.featureGates.Enabled(config.EnableRGTAPI) {
+		m.logger.V(1).Info("ResourceGroupTagging enabled, list the target groups via RGT API")
 		return m.listTargetGroupsRGT(ctx, tagFilters)
 	}
 	return m.listTargetGroupsNative(ctx, tagFilters)
-
 }
 
 func (m *defaultTaggingManager) listLoadBalancersRGT(ctx context.Context, tagFilters []tracking.TagFilter) ([]LoadBalancerWithTags, error) {
 	// use a map to avoid potential duplication in returned resources
-	resourceTagsByARN := make(map[string][]*resourcegroupstaggingapi.Tag)
+	resourceTagsByARN := make(map[string][]rgttypes.Tag)
 	for _, tagFilter := range tagFilters {
-		req := &resourcegroupstaggingapi.GetResourcesInput{
+		req := &rgtsdk.GetResourcesInput{
 			TagFilters:          convertTagFiltersToRGTTagFilters(tagFilter),
-			ResourceTypeFilters: awssdk.StringSlice([]string{services.ResourceTypeELBLoadBalancer}),
+			ResourceTypeFilters: []string{services.ResourceTypeELBLoadBalancer},
 		}
 		resources, err := m.rgt.GetResourcesAsList(ctx, req)
 		if err != nil {
 			return nil, err
 		}
 		for _, resource := range resources {
-			if _, exists := resourceTagsByARN[awssdk.StringValue(resource.ResourceARN)]; !exists {
-				resourceTagsByARN[awssdk.StringValue(resource.ResourceARN)] = resource.Tags
+			if _, exists := resourceTagsByARN[awssdk.ToString(resource.ResourceARN)]; !exists {
+				resourceTagsByARN[awssdk.ToString(resource.ResourceARN)] = resource.Tags
 			}
 		}
 	}
 	var matchedLBs []LoadBalancerWithTags
 	for resourceARN, resourceTags := range resourceTagsByARN {
 		elbv2Req := &elbv2sdk.DescribeLoadBalancersInput{
-			LoadBalancerArns: []*string{&resourceARN},
+			LoadBalancerArns: []string{resourceARN},
 		}
 		elbv2Resp, err := m.elbv2Client.DescribeLoadBalancersAsList(ctx, elbv2Req)
 		if err != nil {
@@ -288,7 +306,7 @@ func (m *defaultTaggingManager) listLoadBalancersRGT(ctx context.Context, tagFil
 			return nil, errors.Errorf("no load balancer found for the arn: %v", resourceARN)
 		}
 		matchedLBs = append(matchedLBs, LoadBalancerWithTags{
-			LoadBalancer: elbv2Resp[0],
+			LoadBalancer: &elbv2Resp[0],
 			Tags:         services.ParseRGTTags(resourceTags),
 		})
 	}
@@ -302,16 +320,16 @@ func (m *defaultTaggingManager) listLoadBalancersNative(ctx context.Context, tag
 		return nil, err
 	}
 	lbARNsWithinVPC := make([]string, 0, len(lbs))
-	lbByARNWithinVPC := make(map[string]*elbv2sdk.LoadBalancer, len(lbs))
+	lbByARNWithinVPC := make(map[string]*elbv2types.LoadBalancer, len(lbs))
 	for _, lb := range lbs {
-		if awssdk.StringValue(lb.VpcId) != m.vpcID {
+		if awssdk.ToString(lb.VpcId) != m.vpcID {
 			continue
 		}
-		lbARN := awssdk.StringValue(lb.LoadBalancerArn)
+		lbARN := awssdk.ToString(lb.LoadBalancerArn)
 		lbARNsWithinVPC = append(lbARNsWithinVPC, lbARN)
-		lbByARNWithinVPC[lbARN] = lb
+		lbByARNWithinVPC[lbARN] = &lb
 	}
-	tagsByARN, err := m.describeResourceTagsNative(ctx, lbARNsWithinVPC)
+	tagsByARN, err := m.describeResourceTags(ctx, lbARNsWithinVPC)
 	if err != nil {
 		return nil, err
 	}
@@ -338,26 +356,26 @@ func (m *defaultTaggingManager) listLoadBalancersNative(ctx context.Context, tag
 
 func (m *defaultTaggingManager) listTargetGroupsRGT(ctx context.Context, tagFilters []tracking.TagFilter) ([]TargetGroupWithTags, error) {
 	// use a map to avoid potential duplication in returned resources
-	resourceTagsByARN := make(map[string][]*resourcegroupstaggingapi.Tag)
+	resourceTagsByARN := make(map[string][]rgttypes.Tag)
 	for _, tagFilter := range tagFilters {
-		req := &resourcegroupstaggingapi.GetResourcesInput{
+		req := &rgtsdk.GetResourcesInput{
 			TagFilters:          convertTagFiltersToRGTTagFilters(tagFilter),
-			ResourceTypeFilters: awssdk.StringSlice([]string{services.ResourceTypeELBTargetGroup}),
+			ResourceTypeFilters: []string{services.ResourceTypeELBTargetGroup},
 		}
 		resources, err := m.rgt.GetResourcesAsList(ctx, req)
 		if err != nil {
 			return nil, err
 		}
 		for _, resource := range resources {
-			if _, exists := resourceTagsByARN[awssdk.StringValue(resource.ResourceARN)]; !exists {
-				resourceTagsByARN[awssdk.StringValue(resource.ResourceARN)] = resource.Tags
+			if _, exists := resourceTagsByARN[awssdk.ToString(resource.ResourceARN)]; !exists {
+				resourceTagsByARN[awssdk.ToString(resource.ResourceARN)] = resource.Tags
 			}
 		}
 	}
 	var matchedTGs []TargetGroupWithTags
 	for resourceARN, resourceTags := range resourceTagsByARN {
 		elbv2Req := &elbv2sdk.DescribeTargetGroupsInput{
-			TargetGroupArns: []*string{&resourceARN},
+			TargetGroupArns: []string{resourceARN},
 		}
 		elbv2Resp, err := m.elbv2Client.DescribeTargetGroupsAsList(ctx, elbv2Req)
 		if err != nil {
@@ -367,7 +385,7 @@ func (m *defaultTaggingManager) listTargetGroupsRGT(ctx context.Context, tagFilt
 			return nil, errors.Errorf("no target group found for the arn: %v", resourceARN)
 		}
 		matchedTGs = append(matchedTGs, TargetGroupWithTags{
-			TargetGroup: elbv2Resp[0],
+			TargetGroup: &elbv2Resp[0],
 			Tags:        services.ParseRGTTags(resourceTags),
 		})
 	}
@@ -382,16 +400,16 @@ func (m *defaultTaggingManager) listTargetGroupsNative(ctx context.Context, tagF
 	}
 
 	tgARNsWithinVPC := make([]string, 0, len(tgs))
-	tgByARNWithinVPC := make(map[string]*elbv2sdk.TargetGroup, len(tgs))
+	tgByARNWithinVPC := make(map[string]*elbv2types.TargetGroup, len(tgs))
 	for _, tg := range tgs {
-		if awssdk.StringValue(tg.VpcId) != m.vpcID {
+		if awssdk.ToString(tg.VpcId) != m.vpcID {
 			continue
 		}
-		tgARN := awssdk.StringValue(tg.TargetGroupArn)
+		tgARN := awssdk.ToString(tg.TargetGroupArn)
 		tgARNsWithinVPC = append(tgARNsWithinVPC, tgARN)
-		tgByARNWithinVPC[tgARN] = tg
+		tgByARNWithinVPC[tgARN] = &tg
 	}
-	tagsByARN, err := m.describeResourceTagsNative(ctx, tgARNsWithinVPC)
+	tagsByARN, err := m.describeResourceTags(ctx, tgARNsWithinVPC)
 	if err != nil {
 		return nil, err
 	}
@@ -416,35 +434,67 @@ func (m *defaultTaggingManager) listTargetGroupsNative(ctx context.Context, tagF
 	return matchedTGs, nil
 }
 
-// describeResourceTagsNative describes tags for elbv2 resources.
+func (m *defaultTaggingManager) describeResourceTags(ctx context.Context, arns []string) (map[string]map[string]string, error) {
+	m.resourceTagsCacheMutex.Lock()
+	defer m.resourceTagsCacheMutex.Unlock()
+
+	tagsByARN := make(map[string]map[string]string, len(arns))
+	var arnsWithoutTagsCache []string
+	for _, arn := range arns {
+		if rawTagsCacheItem, exists := m.resourceTagsCache.Get(arn); exists {
+			tagsCacheItem := rawTagsCacheItem.(map[string]string)
+			tagsByARN[arn] = tagsCacheItem
+		} else {
+			arnsWithoutTagsCache = append(arnsWithoutTagsCache, arn)
+		}
+	}
+	tagsByARNFromAWS, err := m.describeResourceTagsFromAWS(ctx, arnsWithoutTagsCache)
+	if err != nil {
+		return nil, err
+	}
+	for arn, tags := range tagsByARNFromAWS {
+		m.resourceTagsCache.Set(arn, tags, m.resourceTagsCacheTTL)
+		tagsByARN[arn] = tags
+	}
+	return tagsByARN, nil
+}
+
+// describeResourceTagsFromAWS describes tags for elbv2 resources.
 // returns tags indexed by resource ARN.
-func (m *defaultTaggingManager) describeResourceTagsNative(ctx context.Context, arns []string) (map[string]map[string]string, error) {
+func (m *defaultTaggingManager) describeResourceTagsFromAWS(ctx context.Context, arns []string) (map[string]map[string]string, error) {
 	tagsByARN := make(map[string]map[string]string, len(arns))
 	arnsChunks := algorithm.ChunkStrings(arns, m.describeTagsChunkSize)
 	for _, arnsChunk := range arnsChunks {
 		req := &elbv2sdk.DescribeTagsInput{
-			ResourceArns: awssdk.StringSlice(arnsChunk),
+			ResourceArns: arnsChunk,
 		}
 		resp, err := m.elbv2Client.DescribeTagsWithContext(ctx, req)
 		if err != nil {
 			return nil, err
 		}
 		for _, tagDescription := range resp.TagDescriptions {
-			tagsByARN[awssdk.StringValue(tagDescription.ResourceArn)] = convertSDKTagsToTags(tagDescription.Tags)
+			tagsByARN[awssdk.ToString(tagDescription.ResourceArn)] = convertSDKTagsToTags(tagDescription.Tags)
 		}
 	}
 	return tagsByARN, nil
 }
 
+func (m *defaultTaggingManager) invalidateResourceTagsCache(arn string) {
+	m.resourceTagsCacheMutex.Lock()
+	defer m.resourceTagsCacheMutex.Unlock()
+
+	m.resourceTagsCache.Delete(arn)
+}
+
 // convert tags into AWS SDK tag presentation.
-func convertTagsToSDKTags(tags map[string]string) []*elbv2sdk.Tag {
+func convertTagsToSDKTags(tags map[string]string) []elbv2types.Tag {
 	if len(tags) == 0 {
 		return nil
 	}
-	sdkTags := make([]*elbv2sdk.Tag, 0, len(tags))
+	sdkTags := make([]elbv2types.Tag, 0, len(tags))
 
 	for _, key := range sets.StringKeySet(tags).List() {
-		sdkTags = append(sdkTags, &elbv2sdk.Tag{
+		sdkTags = append(sdkTags, elbv2types.Tag{
 			Key:   awssdk.String(key),
 			Value: awssdk.String(tags[key]),
 		})
@@ -453,21 +503,21 @@ func convertTagsToSDKTags(tags map[string]string) []*elbv2sdk.Tag {
 }
 
 // convert AWS SDK tag presentation into tags.
-func convertSDKTagsToTags(sdkTags []*elbv2sdk.Tag) map[string]string {
+func convertSDKTagsToTags(sdkTags []elbv2types.Tag) map[string]string {
 	tags := make(map[string]string, len(sdkTags))
 	for _, sdkTag := range sdkTags {
-		tags[awssdk.StringValue(sdkTag.Key)] = awssdk.StringValue(sdkTag.Value)
+		tags[awssdk.ToString(sdkTag.Key)] = awssdk.ToString(sdkTag.Value)
 	}
 	return tags
 }
 
 // convert tagFilters to RGTTagFilters
-func convertTagFiltersToRGTTagFilters(tagFilter tracking.TagFilter) []*resourcegroupstaggingapi.TagFilter {
-	var RGTTagFilters []*resourcegroupstaggingapi.TagFilter
+func convertTagFiltersToRGTTagFilters(tagFilter tracking.TagFilter) []rgttypes.TagFilter {
+	var RGTTagFilters []rgttypes.TagFilter
 	for k, v := range tagFilter {
-		RGTTagFilters = append(RGTTagFilters, &resourcegroupstaggingapi.TagFilter{
+		RGTTagFilters = append(RGTTagFilters, rgttypes.TagFilter{
 			Key:    awssdk.String(k),
-			Values: awssdk.StringSlice(v),
+			Values: v,
 		})
 	}
 	return RGTTagFilters

@@ -131,6 +131,25 @@ You can use IngressClassParams to enforce settings for a set of Ingresses.
         - myVal0
         - myVal1
     ```
+    - with certificateArn
+    ```
+    apiVersion: elbv2.k8s.aws/v1beta1
+    kind: IngressClassParams
+    metadata:
+    name: class2048-config
+    spec:
+      certificateArn: ['arn:aws:acm:us-east-1:123456789:certificate/test-arn-1','arn:aws:acm:us-east-1:123456789:certificate/test-arn-2']
+    ```
+    - with minimumLoadBalancerCapacity.capacityUnits
+    ```
+    apiVersion: elbv2.k8s.aws/v1beta1
+    kind: IngressClassParams
+    metadata:
+      name: class2048-config
+    spec:
+      minimumLoadBalancerCapacity:
+        capacityUnits: 1000
+    ```
 
 ### IngressClassParams specification
 
@@ -167,6 +186,11 @@ Cluster administrators can use the `scheme` field to restrict the scheme for all
 Cluster administrators can use the optional `inboundCIDRs` field to specify the CIDRs that are allowed to access the load balancers that belong to this IngressClass.
 If the field is specified, LBC will ignore the `alb.ingress.kubernetes.io/inbound-cidrs` annotation.
 
+#### spec.certificateArn
+Cluster administrators can use the optional `certificateARN` field to specify the ARN of the certificates for all Ingresses that belong to IngressClass with this IngressClassParams.
+    
+If the field is specified, LBC will ignore the `alb.ingress.kubernetes.io/certificate-arn` annotation.
+
 #### spec.sslPolicy
 
 Cluster administrators can use the optional `sslPolicy` field to specify the SSL policy for the load balancers that belong to this IngressClass.
@@ -192,7 +216,7 @@ Within any given availability zone, subnets with a cluster tag will be chosen ov
 
 #### spec.ipAddressType
 
-`ipAddressType` is an optional setting. The available options are `ipv4` or `dualstack`.
+`ipAddressType` is an optional setting. The available options are `ipv4`, `dualstack`, or `dualstack-without-public-ipv4`.
 
 Cluster administrators can use `ipAddressType` field to restrict the ipAddressType for all Ingresses that belong to this IngressClass.
 
@@ -219,3 +243,12 @@ Cluster administrators can use `loadBalancerAttributes` field to specify the [Lo
 
 1. If `loadBalancerAttributes` is set, the attributes defined will be applied to the load balancer that belong to this IngressClass. If you specify invalid keys or values for the load balancer attributes, the controller will fail to reconcile ingresses belonging to the particular ingress class.
 2. If `loadBalancerAttributes` un-specified, Ingresses with this IngressClass can continue to use `alb.ingress.kubernetes.io/load-balancer-attributes` annotation to specify the load balancer attributes.
+
+#### spec.minimumLoadBalancerCapacity
+
+Cluster administrators can use the optional `minimumLoadBalancerCapacity` field to specify the capacity reservation for the load balancers that belong to this IngressClass.
+They may specify `capacityUnits`. If the field is specified, LBC will ignore the `alb.ingress.kubernetes.io/minimum-load-balancer-capacity annotation` annotation.
+
+##### spec.minimumLoadBalancerCapacity.capacityUnits
+
+If `capacityUnits` is specified, it must be to valid positive value greater than 0. If set to 0, the LBC will reset the capacity reservation for the load balancer.

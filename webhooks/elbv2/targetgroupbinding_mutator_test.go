@@ -2,10 +2,11 @@ package elbv2
 
 import (
 	"context"
+	elbv2types "github.com/aws/aws-sdk-go-v2/service/elasticloadbalancingv2/types"
 	"testing"
 
-	awssdk "github.com/aws/aws-sdk-go/aws"
-	elbv2sdk "github.com/aws/aws-sdk-go/service/elbv2"
+	awssdk "github.com/aws/aws-sdk-go-v2/aws"
+	elbv2sdk "github.com/aws/aws-sdk-go-v2/service/elasticloadbalancingv2"
 	"github.com/go-logr/logr"
 	"github.com/golang/mock/gomock"
 	"github.com/pkg/errors"
@@ -18,7 +19,7 @@ import (
 func Test_targetGroupBindingMutator_MutateCreate(t *testing.T) {
 	type describeTargetGroupsAsListCall struct {
 		req  *elbv2sdk.DescribeTargetGroupsInput
-		resp []*elbv2sdk.TargetGroup
+		resp []elbv2types.TargetGroup
 		err  error
 	}
 
@@ -41,7 +42,7 @@ func Test_targetGroupBindingMutator_MutateCreate(t *testing.T) {
 		wantErr error
 	}{
 		{
-			name: "targetGroupBinding with TargetType and ipAddressType already set",
+			name: "targetGroupBinding with TargetType and ipAddressType and vpcID already set",
 			fields: fields{
 				describeTargetGroupsAsListCalls: nil,
 			},
@@ -51,6 +52,7 @@ func Test_targetGroupBindingMutator_MutateCreate(t *testing.T) {
 						TargetGroupARN: "tg-1",
 						TargetType:     &instanceTargetType,
 						IPAddressType:  &targetGroupIPAddressTypeIPv4,
+						VpcID:          "vpcid-01",
 					},
 				},
 			},
@@ -59,6 +61,7 @@ func Test_targetGroupBindingMutator_MutateCreate(t *testing.T) {
 					TargetGroupARN: "tg-1",
 					TargetType:     &instanceTargetType,
 					IPAddressType:  &targetGroupIPAddressTypeIPv4,
+					VpcID:          "vpcid-01",
 				},
 			},
 		},
@@ -68,12 +71,12 @@ func Test_targetGroupBindingMutator_MutateCreate(t *testing.T) {
 				describeTargetGroupsAsListCalls: []describeTargetGroupsAsListCall{
 					{
 						req: &elbv2sdk.DescribeTargetGroupsInput{
-							TargetGroupArns: awssdk.StringSlice([]string{"tg-1"}),
+							TargetGroupArns: []string{"tg-1"},
 						},
-						resp: []*elbv2sdk.TargetGroup{
+						resp: []elbv2types.TargetGroup{
 							{
 								TargetGroupArn: awssdk.String("tg-1"),
-								TargetType:     awssdk.String("instance"),
+								TargetType:     elbv2types.TargetTypeEnumInstance,
 							},
 						},
 					},
@@ -101,12 +104,12 @@ func Test_targetGroupBindingMutator_MutateCreate(t *testing.T) {
 				describeTargetGroupsAsListCalls: []describeTargetGroupsAsListCall{
 					{
 						req: &elbv2sdk.DescribeTargetGroupsInput{
-							TargetGroupArns: awssdk.StringSlice([]string{"tg-1"}),
+							TargetGroupArns: []string{"tg-1"},
 						},
-						resp: []*elbv2sdk.TargetGroup{
+						resp: []elbv2types.TargetGroup{
 							{
 								TargetGroupArn: awssdk.String("tg-1"),
-								TargetType:     awssdk.String("ip"),
+								TargetType:     elbv2types.TargetTypeEnumIp,
 							},
 						},
 					},
@@ -134,12 +137,12 @@ func Test_targetGroupBindingMutator_MutateCreate(t *testing.T) {
 				describeTargetGroupsAsListCalls: []describeTargetGroupsAsListCall{
 					{
 						req: &elbv2sdk.DescribeTargetGroupsInput{
-							TargetGroupArns: awssdk.StringSlice([]string{"tg-1"}),
+							TargetGroupArns: []string{"tg-1"},
 						},
-						resp: []*elbv2sdk.TargetGroup{
+						resp: []elbv2types.TargetGroup{
 							{
 								TargetGroupArn: awssdk.String("tg-1"),
-								TargetType:     awssdk.String("lambda"),
+								TargetType:     elbv2types.TargetTypeEnumLambda,
 							},
 						},
 					},
@@ -166,6 +169,7 @@ func Test_targetGroupBindingMutator_MutateCreate(t *testing.T) {
 						TargetGroupARN: "tg-1",
 						TargetType:     &instanceTargetType,
 						IPAddressType:  &targetGroupIPAddressTypeIPv6,
+						VpcID:          "vpcid-01",
 					},
 				},
 			},
@@ -174,6 +178,111 @@ func Test_targetGroupBindingMutator_MutateCreate(t *testing.T) {
 					TargetGroupARN: "tg-1",
 					TargetType:     &instanceTargetType,
 					IPAddressType:  &targetGroupIPAddressTypeIPv6,
+					VpcID:          "vpcid-01",
+				},
+			},
+		},
+		{
+			name: "targetGroupBinding with VpcID absent will be defaulted via AWS API",
+			fields: fields{
+				describeTargetGroupsAsListCalls: []describeTargetGroupsAsListCall{
+					{
+						req: &elbv2sdk.DescribeTargetGroupsInput{
+							TargetGroupArns: []string{"tg-1"},
+						},
+						resp: []elbv2types.TargetGroup{
+							{
+								VpcId: awssdk.String("vpcid-01"),
+							},
+						},
+					},
+				},
+			},
+			args: args{
+				obj: &elbv2api.TargetGroupBinding{
+					Spec: elbv2api.TargetGroupBindingSpec{
+						TargetGroupARN: "tg-1",
+						TargetType:     &instanceTargetType,
+						IPAddressType:  &targetGroupIPAddressTypeIPv4,
+					},
+				},
+			},
+			want: &elbv2api.TargetGroupBinding{
+				Spec: elbv2api.TargetGroupBindingSpec{
+					TargetGroupARN: "tg-1",
+					TargetType:     &instanceTargetType,
+					IPAddressType:  &targetGroupIPAddressTypeIPv4,
+					VpcID:          "vpcid-01",
+				},
+			},
+		},
+		{
+			name: "targetGroupBinding with VpcID absent will be defaulted via AWS API - error",
+			fields: fields{
+				describeTargetGroupsAsListCalls: []describeTargetGroupsAsListCall{
+					{
+						req: &elbv2sdk.DescribeTargetGroupsInput{
+							TargetGroupArns: []string{"tg-1"},
+						},
+						err: errors.New("vpcid not found"),
+					},
+				},
+			},
+			args: args{
+				obj: &elbv2api.TargetGroupBinding{
+					Spec: elbv2api.TargetGroupBindingSpec{
+						TargetGroupARN: "tg-1",
+						TargetType:     &instanceTargetType,
+						IPAddressType:  &targetGroupIPAddressTypeIPv4,
+					},
+				},
+			},
+			wantErr: errors.New("unable to get target group VpcID: vpcid not found"),
+		},
+		{
+			name: "targetGroupBinding with TargetGroupName instead of TargetGroupARN",
+			fields: fields{
+				describeTargetGroupsAsListCalls: []describeTargetGroupsAsListCall{
+					{
+						req: &elbv2sdk.DescribeTargetGroupsInput{
+							Names: []string{"tg-name"},
+						},
+						resp: []elbv2types.TargetGroup{
+							{
+								TargetGroupArn:  awssdk.String("tg-arn"),
+								TargetGroupName: awssdk.String("tg-name"),
+								TargetType:      elbv2types.TargetTypeEnumInstance,
+							},
+						},
+					},
+					{
+						req: &elbv2sdk.DescribeTargetGroupsInput{
+							TargetGroupArns: []string{"tg-arn"},
+						},
+						resp: []elbv2types.TargetGroup{
+							{
+								TargetGroupArn: awssdk.String("tg-arn"),
+								TargetType:     elbv2types.TargetTypeEnumInstance,
+							},
+						},
+					},
+				},
+			},
+			args: args{
+				obj: &elbv2api.TargetGroupBinding{
+					Spec: elbv2api.TargetGroupBindingSpec{
+						TargetGroupName: "tg-name",
+						TargetType:      &instanceTargetType,
+						IPAddressType:   &targetGroupIPAddressTypeIPv4,
+					},
+				},
+			},
+			want: &elbv2api.TargetGroupBinding{
+				Spec: elbv2api.TargetGroupBindingSpec{
+					TargetGroupARN:  "tg-arn",
+					TargetGroupName: "tg-name",
+					TargetType:      &instanceTargetType,
+					IPAddressType:   &targetGroupIPAddressTypeIPv4,
 				},
 			},
 		},
@@ -205,7 +314,7 @@ func Test_targetGroupBindingMutator_MutateCreate(t *testing.T) {
 func Test_targetGroupBindingMutator_obtainSDKTargetTypeFromAWS(t *testing.T) {
 	type describeTargetGroupsAsListCall struct {
 		req  *elbv2sdk.DescribeTargetGroupsInput
-		resp []*elbv2sdk.TargetGroup
+		resp []elbv2types.TargetGroup
 		err  error
 	}
 
@@ -228,11 +337,11 @@ func Test_targetGroupBindingMutator_obtainSDKTargetTypeFromAWS(t *testing.T) {
 				describeTargetGroupsAsListCalls: []describeTargetGroupsAsListCall{
 					{
 						req: &elbv2sdk.DescribeTargetGroupsInput{
-							TargetGroupArns: awssdk.StringSlice([]string{"tg-1"}),
+							TargetGroupArns: []string{"tg-1"},
 						},
-						resp: []*elbv2sdk.TargetGroup{
+						resp: []elbv2types.TargetGroup{
 							{
-								TargetType: awssdk.String("instance"),
+								TargetType: elbv2types.TargetTypeEnumInstance,
 							},
 						},
 					},
@@ -249,11 +358,11 @@ func Test_targetGroupBindingMutator_obtainSDKTargetTypeFromAWS(t *testing.T) {
 				describeTargetGroupsAsListCalls: []describeTargetGroupsAsListCall{
 					{
 						req: &elbv2sdk.DescribeTargetGroupsInput{
-							TargetGroupArns: awssdk.StringSlice([]string{"tg-1"}),
+							TargetGroupArns: []string{"tg-1"},
 						},
-						resp: []*elbv2sdk.TargetGroup{
+						resp: []elbv2types.TargetGroup{
 							{
-								TargetType: awssdk.String("ip"),
+								TargetType: elbv2types.TargetTypeEnumIp,
 							},
 						},
 					},
@@ -270,7 +379,7 @@ func Test_targetGroupBindingMutator_obtainSDKTargetTypeFromAWS(t *testing.T) {
 				describeTargetGroupsAsListCalls: []describeTargetGroupsAsListCall{
 					{
 						req: &elbv2sdk.DescribeTargetGroupsInput{
-							TargetGroupArns: awssdk.StringSlice([]string{"tg-1"}),
+							TargetGroupArns: []string{"tg-1"},
 						},
 						err: errors.New("targetGroup not found"),
 					},
@@ -309,7 +418,7 @@ func Test_targetGroupBindingMutator_obtainSDKTargetTypeFromAWS(t *testing.T) {
 func Test_targetGroupBindingMutator_getIPAddressTypeFromAWS(t *testing.T) {
 	type describeTargetGroupsAsListCall struct {
 		req  *elbv2sdk.DescribeTargetGroupsInput
-		resp []*elbv2sdk.TargetGroup
+		resp []elbv2types.TargetGroup
 		err  error
 	}
 
@@ -332,11 +441,11 @@ func Test_targetGroupBindingMutator_getIPAddressTypeFromAWS(t *testing.T) {
 				describeTargetGroupsAsListCalls: []describeTargetGroupsAsListCall{
 					{
 						req: &elbv2sdk.DescribeTargetGroupsInput{
-							TargetGroupArns: awssdk.StringSlice([]string{"tg-1"}),
+							TargetGroupArns: []string{"tg-1"},
 						},
-						resp: []*elbv2sdk.TargetGroup{
+						resp: []elbv2types.TargetGroup{
 							{
-								TargetType: awssdk.String("instance"),
+								TargetType: elbv2types.TargetTypeEnumInstance,
 							},
 						},
 					},
@@ -353,12 +462,12 @@ func Test_targetGroupBindingMutator_getIPAddressTypeFromAWS(t *testing.T) {
 				describeTargetGroupsAsListCalls: []describeTargetGroupsAsListCall{
 					{
 						req: &elbv2sdk.DescribeTargetGroupsInput{
-							TargetGroupArns: awssdk.StringSlice([]string{"tg-1"}),
+							TargetGroupArns: []string{"tg-1"},
 						},
-						resp: []*elbv2sdk.TargetGroup{
+						resp: []elbv2types.TargetGroup{
 							{
-								TargetType:    awssdk.String("ip"),
-								IpAddressType: awssdk.String("ipv4"),
+								TargetType:    elbv2types.TargetTypeEnumIp,
+								IpAddressType: elbv2types.TargetGroupIpAddressTypeEnumIpv4,
 							},
 						},
 					},
@@ -375,12 +484,12 @@ func Test_targetGroupBindingMutator_getIPAddressTypeFromAWS(t *testing.T) {
 				describeTargetGroupsAsListCalls: []describeTargetGroupsAsListCall{
 					{
 						req: &elbv2sdk.DescribeTargetGroupsInput{
-							TargetGroupArns: awssdk.StringSlice([]string{"tg-1"}),
+							TargetGroupArns: []string{"tg-1"},
 						},
-						resp: []*elbv2sdk.TargetGroup{
+						resp: []elbv2types.TargetGroup{
 							{
-								TargetType:    awssdk.String("ip"),
-								IpAddressType: awssdk.String("ipv6"),
+								TargetType:    elbv2types.TargetTypeEnumIp,
+								IpAddressType: elbv2types.TargetGroupIpAddressTypeEnumIpv6,
 							},
 						},
 					},
@@ -397,7 +506,7 @@ func Test_targetGroupBindingMutator_getIPAddressTypeFromAWS(t *testing.T) {
 				describeTargetGroupsAsListCalls: []describeTargetGroupsAsListCall{
 					{
 						req: &elbv2sdk.DescribeTargetGroupsInput{
-							TargetGroupArns: awssdk.StringSlice([]string{"tg-1"}),
+							TargetGroupArns: []string{"tg-1"},
 						},
 						err: errors.New("targetGroup not found"),
 					},
@@ -423,6 +532,89 @@ func Test_targetGroupBindingMutator_getIPAddressTypeFromAWS(t *testing.T) {
 				logger:      logr.New(&log.NullLogSink{}),
 			}
 			got, err := m.getTargetGroupIPAddressTypeFromAWS(context.Background(), tt.args.tgARN)
+			if tt.wantErr != nil {
+				assert.EqualError(t, err, tt.wantErr.Error())
+			} else {
+				assert.NoError(t, err)
+				assert.Equal(t, tt.want, got)
+			}
+		})
+	}
+}
+
+func Test_targetGroupBindingMutator_obtainSDKVpcIDFromAWS(t *testing.T) {
+	type describeTargetGroupsAsListCall struct {
+		req  *elbv2sdk.DescribeTargetGroupsInput
+		resp []elbv2types.TargetGroup
+		err  error
+	}
+
+	type fields struct {
+		describeTargetGroupsAsListCalls []describeTargetGroupsAsListCall
+	}
+	type args struct {
+		tgARN string
+	}
+	tests := []struct {
+		name    string
+		fields  fields
+		args    args
+		want    string
+		wantErr error
+	}{
+		{
+			name: "fetch vpcid from aws",
+			fields: fields{
+				describeTargetGroupsAsListCalls: []describeTargetGroupsAsListCall{
+					{
+						req: &elbv2sdk.DescribeTargetGroupsInput{
+							TargetGroupArns: []string{"tg-1"},
+						},
+						resp: []elbv2types.TargetGroup{
+							{
+								VpcId: awssdk.String("vpcid-01"),
+							},
+						},
+					},
+				},
+			},
+			args: args{
+				tgARN: "tg-1",
+			},
+			want: "vpcid-01",
+		},
+		{
+			name: "some error while fetching vpcId",
+			fields: fields{
+				describeTargetGroupsAsListCalls: []describeTargetGroupsAsListCall{
+					{
+						req: &elbv2sdk.DescribeTargetGroupsInput{
+							TargetGroupArns: []string{"tg-1"},
+						},
+						err: errors.New("vpcid not found"),
+					},
+				},
+			},
+			args: args{
+				tgARN: "tg-1",
+			},
+			wantErr: errors.New("vpcid not found"),
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctrl := gomock.NewController(t)
+			defer ctrl.Finish()
+			elbv2Client := services.NewMockELBV2(ctrl)
+			for _, call := range tt.fields.describeTargetGroupsAsListCalls {
+				elbv2Client.EXPECT().DescribeTargetGroupsAsList(gomock.Any(), call.req).Return(call.resp, call.err)
+			}
+
+			m := &targetGroupBindingMutator{
+				elbv2Client: elbv2Client,
+				logger:      logr.New(&log.NullLogSink{}),
+			}
+			got, err := m.getVpcIDFromAWS(context.Background(), tt.args.tgARN)
 			if tt.wantErr != nil {
 				assert.EqualError(t, err, tt.wantErr.Error())
 			} else {

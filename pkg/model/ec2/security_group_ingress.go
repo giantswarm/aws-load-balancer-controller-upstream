@@ -18,16 +18,24 @@ type UserIDGroupPair struct {
 	Description string `json:"description,omitempty"`
 }
 
+type PrefixList struct {
+	ListID string `json:"listID"`
+	// +optional
+	Description string `json:"description,omitempty"`
+}
+
 type IPPermission struct {
 	IPProtocol string `json:"ipProtocol"`
 	// +optional
-	FromPort *int64 `json:"fromPort,omitempty"`
+	FromPort *int32 `json:"fromPort,omitempty"`
 	// +optional
-	ToPort *int64 `json:"toPort,omitempty"`
+	ToPort *int32 `json:"toPort,omitempty"`
 	// +optional
 	IPRanges []IPRange `json:"ipRanges,omitempty"`
 	// +optional
 	IPv6Range []IPv6Range `json:"ipv6Ranges,omitempty"`
 	// +optional
 	UserIDGroupPairs []UserIDGroupPair `json:"userIDGroupPairs,omitempty"`
+	// +optional
+	PrefixLists []PrefixList `json:"prefixLists,omitempty"`
 }

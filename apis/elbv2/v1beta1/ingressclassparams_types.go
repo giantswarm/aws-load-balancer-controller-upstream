@@ -20,13 +20,14 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
-// +kubebuilder:validation:Enum=ipv4;dualstack
+// +kubebuilder:validation:Enum=ipv4;dualstack;dualstack-without-public-ipv4
 // IPAddressType is the ip address type of load balancer.
 type IPAddressType string
 
 const (
-	IPAddressTypeIPV4      IPAddressType = "ipv4"
-	IPAddressTypeDualStack IPAddressType = "dualstack"
+	IPAddressTypeIPV4                       IPAddressType = "ipv4"
+	IPAddressTypeDualStack                  IPAddressType = "dualstack"
+	IPAddressTypeDualStackWithoutPublicIPV4 IPAddressType = "dualstack-without-public-ipv4"
 )
 
 // +kubebuilder:validation:Enum=internal;internet-facing
@@ -84,8 +85,34 @@ type Attribute struct {
 	Value string `json:"value"`
 }
 
+type ListenerProtocol string
+
+const (
+	ListenerProtocolHTTP  ListenerProtocol = "HTTP"
+	ListenerProtocolHTTPS ListenerProtocol = "HTTPS"
+)
+
+type Listener struct {
+	// The protocol of the listener
+	Protocol ListenerProtocol `json:"protocol,omitempty"`
+	// The port of the listener
+	Port int32 `json:"port,omitempty"`
+	// The attributes of the listener
+	ListenerAttributes []Attribute `json:"listenerAttributes,omitempty"`
+}
+
+// Information about a load balancer capacity reservation.
+type MinimumLoadBalancerCapacity struct {
+	// The Capacity Units Value.
+	CapacityUnits int32 `json:"capacityUnits"`
+}
+
 // IngressClassParamsSpec defines the desired state of IngressClassParams
 type IngressClassParamsSpec struct {
+	// CertificateArn specifies the ARN of the certificates for all Ingresses that belong to IngressClass with this IngressClassParams.
+	// +optional
+	CertificateArn []string `json:"certificateArn,omitempty"`
+
 	// NamespaceSelector restrict the namespaces of Ingresses that are allowed to specify the IngressClass with this IngressClassParams.
 	// * if absent or present but empty, it selects all namespaces.
 	// +optional
@@ -121,6 +148,14 @@ type IngressClassParamsSpec struct {
 	// LoadBalancerAttributes define the custom attributes to LoadBalancers for all Ingress that that belong to IngressClass with this IngressClassParams.
 	// +optional
 	LoadBalancerAttributes []Attribute `json:"loadBalancerAttributes,omitempty"`
+
+	// Listeners define a list of listeners with their protocol, port and attributes.
+	// +optional
+	Listeners []Listener `json:"listeners,omitempty"`
+
+	// MinimumLoadBalancerCapacity define the capacity reservation for LoadBalancers for all Ingress that belong to IngressClass with this IngressClassParams.
+	// +optional
+	MinimumLoadBalancerCapacity *MinimumLoadBalancerCapacity `json:"minimumLoadBalancerCapacity,omitempty"`
 }
 
 // +kubebuilder:object:root=true

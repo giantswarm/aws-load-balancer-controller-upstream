@@ -2,10 +2,11 @@ package ingress
 
 import (
 	"context"
+	elbv2types "github.com/aws/aws-sdk-go-v2/service/elasticloadbalancingv2/types"
+	"reflect"
 	"strconv"
 
-	awssdk "github.com/aws/aws-sdk-go/aws"
-	elbv2sdk "github.com/aws/aws-sdk-go/service/elbv2"
+	awssdk "github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/go-logr/logr"
 	"github.com/pkg/errors"
 	corev1 "k8s.io/api/core/v1"
@@ -37,40 +38,42 @@ type ModelBuilder interface {
 
 // NewDefaultModelBuilder constructs new defaultModelBuilder.
 func NewDefaultModelBuilder(k8sClient client.Client, eventRecorder record.EventRecorder,
-	ec2Client services.EC2, acmClient services.ACM,
+	ec2Client services.EC2, elbv2Client services.ELBV2, acmClient services.ACM,
 	annotationParser annotations.Parser, subnetsResolver networkingpkg.SubnetsResolver,
 	authConfigBuilder AuthConfigBuilder, enhancedBackendBuilder EnhancedBackendBuilder,
 	trackingProvider tracking.Provider, elbv2TaggingManager elbv2deploy.TaggingManager, featureGates config.FeatureGates,
-	vpcID string, clusterName string, defaultTags map[string]string, externalManagedTags []string, defaultSSLPolicy string, defaultTargetType string,
+	vpcID string, clusterName string, defaultTags map[string]string, externalManagedTags []string, defaultSSLPolicy string, defaultTargetType string, defaultLoadBalancerScheme string,
 	backendSGProvider networkingpkg.BackendSGProvider, sgResolver networkingpkg.SecurityGroupResolver,
-	enableBackendSG bool, disableRestrictedSGRules bool, enableIPTargetType bool, logger logr.Logger) *defaultModelBuilder {
-	certDiscovery := NewACMCertDiscovery(acmClient, logger)
+	enableBackendSG bool, disableRestrictedSGRules bool, allowedCAARNs []string, enableIPTargetType bool, logger logr.Logger) *defaultModelBuilder {
+	certDiscovery := NewACMCertDiscovery(acmClient, allowedCAARNs, logger)
 	ruleOptimizer := NewDefaultRuleOptimizer(logger)
 	return &defaultModelBuilder{
-		k8sClient:                k8sClient,
-		eventRecorder:            eventRecorder,
-		ec2Client:                ec2Client,
-		vpcID:                    vpcID,
-		clusterName:              clusterName,
-		annotationParser:         annotationParser,
-		subnetsResolver:          subnetsResolver,
-		backendSGProvider:        backendSGProvider,
-		sgResolver:               sgResolver,
-		certDiscovery:            certDiscovery,
-		authConfigBuilder:        authConfigBuilder,
-		enhancedBackendBuilder:   enhancedBackendBuilder,
-		ruleOptimizer:            ruleOptimizer,
-		trackingProvider:         trackingProvider,
-		elbv2TaggingManager:      elbv2TaggingManager,
-		featureGates:             featureGates,
-		defaultTags:              defaultTags,
-		externalManagedTags:      sets.NewString(externalManagedTags...),
-		defaultSSLPolicy:         defaultSSLPolicy,
-		defaultTargetType:        elbv2model.TargetType(defaultTargetType),
-		enableBackendSG:          enableBackendSG,
-		disableRestrictedSGRules: disableRestrictedSGRules,
-		enableIPTargetType:       enableIPTargetType,
-		logger:                   logger,
+		k8sClient:                 k8sClient,
+		eventRecorder:             eventRecorder,
+		ec2Client:                 ec2Client,
+		elbv2Client:               elbv2Client,
+		vpcID:                     vpcID,
+		clusterName:               clusterName,
+		annotationParser:          annotationParser,
+		subnetsResolver:           subnetsResolver,
+		backendSGProvider:         backendSGProvider,
+		sgResolver:                sgResolver,
+		certDiscovery:             certDiscovery,
+		authConfigBuilder:         authConfigBuilder,
+		enhancedBackendBuilder:    enhancedBackendBuilder,
+		ruleOptimizer:             ruleOptimizer,
+		trackingProvider:          trackingProvider,
+		elbv2TaggingManager:       elbv2TaggingManager,
+		featureGates:              featureGates,
+		defaultTags:               defaultTags,
+		externalManagedTags:       sets.NewString(externalManagedTags...),
+		defaultSSLPolicy:          defaultSSLPolicy,
+		defaultTargetType:         elbv2model.TargetType(defaultTargetType),
+		defaultLoadBalancerScheme: elbv2model.LoadBalancerScheme(defaultLoadBalancerScheme),
+		enableBackendSG:           enableBackendSG,
+		disableRestrictedSGRules:  disableRestrictedSGRules,
+		enableIPTargetType:        enableIPTargetType,
+		logger:                    logger,
 	}
 }
 
@@ -81,28 +84,30 @@ type defaultModelBuilder struct {
 	k8sClient     client.Client
 	eventRecorder record.EventRecorder
 	ec2Client     services.EC2
+	elbv2Client   services.ELBV2
 
 	vpcID       string
 	clusterName string
 
-	annotationParser         annotations.Parser
-	subnetsResolver          networkingpkg.SubnetsResolver
-	backendSGProvider        networkingpkg.BackendSGProvider
-	sgResolver               networkingpkg.SecurityGroupResolver
-	certDiscovery            CertDiscovery
-	authConfigBuilder        AuthConfigBuilder
-	enhancedBackendBuilder   EnhancedBackendBuilder
-	ruleOptimizer            RuleOptimizer
-	trackingProvider         tracking.Provider
-	elbv2TaggingManager      elbv2deploy.TaggingManager
-	featureGates             config.FeatureGates
-	defaultTags              map[string]string
-	externalManagedTags      sets.String
-	defaultSSLPolicy         string
-	defaultTargetType        elbv2model.TargetType
-	enableBackendSG          bool
-	disableRestrictedSGRules bool
-	enableIPTargetType       bool
+	annotationParser          annotations.Parser
+	subnetsResolver           networkingpkg.SubnetsResolver
+	backendSGProvider         networkingpkg.BackendSGProvider
+	sgResolver                networkingpkg.SecurityGroupResolver
+	certDiscovery             CertDiscovery
+	authConfigBuilder         AuthConfigBuilder
+	enhancedBackendBuilder    EnhancedBackendBuilder
+	ruleOptimizer             RuleOptimizer
+	trackingProvider          tracking.Provider
+	elbv2TaggingManager       elbv2deploy.TaggingManager
+	featureGates              config.FeatureGates
+	defaultTags               map[string]string
+	externalManagedTags       sets.String
+	defaultSSLPolicy          string
+	defaultTargetType         elbv2model.TargetType
+	defaultLoadBalancerScheme elbv2model.LoadBalancerScheme
+	enableBackendSG           bool
+	disableRestrictedSGRules  bool
+	enableIPTargetType        bool
 
 	logger logr.Logger
 }
@@ -114,6 +119,7 @@ func (b *defaultModelBuilder) Build(ctx context.Context, ingGroup Group) (core.S
 		k8sClient:                b.k8sClient,
 		eventRecorder:            b.eventRecorder,
 		ec2Client:                b.ec2Client,
+		elbv2Client:              b.elbv2Client,
 		vpcID:                    b.vpcID,
 		clusterName:              b.clusterName,
 		annotationParser:         b.annotationParser,
@@ -138,7 +144,7 @@ func (b *defaultModelBuilder) Build(ctx context.Context, ingGroup Group) (core.S
 		defaultTags:                               b.defaultTags,
 		externalManagedTags:                       b.externalManagedTags,
 		defaultIPAddressType:                      elbv2model.IPAddressTypeIPV4,
-		defaultScheme:                             elbv2model.LoadBalancerSchemeInternal,
+		defaultScheme:                             b.defaultLoadBalancerScheme,
 		defaultSSLPolicy:                          b.defaultSSLPolicy,
 		defaultTargetType:                         b.defaultTargetType,
 		defaultBackendProtocol:                    elbv2model.ProtocolHTTP,
@@ -167,6 +173,7 @@ type defaultModelBuildTask struct {
 	k8sClient              client.Client
 	eventRecorder          record.EventRecorder
 	ec2Client              services.EC2
+	elbv2Client            services.ELBV2
 	vpcID                  string
 	clusterName            string
 	annotationParser       annotations.Parser
@@ -201,10 +208,10 @@ type defaultModelBuildTask struct {
 	defaultBackendProtocolVersion             elbv2model.ProtocolVersion
 	defaultHealthCheckPathHTTP                string
 	defaultHealthCheckPathGRPC                string
-	defaultHealthCheckTimeoutSeconds          int64
-	defaultHealthCheckIntervalSeconds         int64
-	defaultHealthCheckHealthyThresholdCount   int64
-	defaultHealthCheckUnhealthyThresholdCount int64
+	defaultHealthCheckTimeoutSeconds          int32
+	defaultHealthCheckIntervalSeconds         int32
+	defaultHealthCheckHealthyThresholdCount   int32
+	defaultHealthCheckUnhealthyThresholdCount int32
 	defaultHealthCheckMatcherHTTPCode         string
 	defaultHealthCheckMatcherGRPCCode         string
 
@@ -230,8 +237,8 @@ func (t *defaultModelBuildTask) run(ctx context.Context) error {
 		return nil
 	}
 
-	ingListByPort := make(map[int64][]ClassifiedIngress)
-	listenPortConfigsByPort := make(map[int64][]listenPortConfigWithIngress)
+	ingListByPort := make(map[int32][]ClassifiedIngress)
+	listenPortConfigsByPort := make(map[int32][]listenPortConfigWithIngress)
 	for _, member := range t.ingGroup.Members {
 		ingKey := k8s.NamespacedName(member.Ing)
 		listenPortConfigByPortForIngress, err := t.computeIngressListenPortConfigByPort(ctx, &member)
@@ -247,7 +254,7 @@ func (t *defaultModelBuildTask) run(ctx context.Context) error {
 		}
 	}
 
-	listenPortConfigByPort := make(map[int64]listenPortConfig)
+	listenPortConfigByPort := make(map[int32]listenPortConfig)
 	for port, cfgs := range listenPortConfigsByPort {
 		mergedCfg, err := t.mergeListenPortConfigs(ctx, cfgs)
 		if err != nil {
@@ -293,11 +300,17 @@ func (t *defaultModelBuildTask) mergeListenPortConfigs(_ context.Context, listen
 	mergedInboundCIDRv6s := sets.NewString()
 	mergedInboundCIDRv4s := sets.NewString()
 
+	var mergedInboundPrefixListsProvider *types.NamespacedName
+	mergedInboundPrefixLists := sets.NewString()
+
 	var mergedSSLPolicyProvider *types.NamespacedName
 	var mergedSSLPolicy *string
 
 	var mergedTLSCerts []string
 	mergedTLSCertsSet := sets.NewString()
+
+	var mergedMtlsAttributesProvider *types.NamespacedName
+	var mergedMtlsAttributes *elbv2model.MutualAuthenticationAttributes
 
 	for _, cfg := range listenPortConfigs {
 		if mergedProtocolProvider == nil {
@@ -321,13 +334,24 @@ func (t *defaultModelBuildTask) mergeListenPortConfigs(_ context.Context, listen
 			}
 		}
 
+		if len(cfg.listenPortConfig.prefixLists) != 0 {
+			cfgInboundPrefixLists := sets.NewString(cfg.listenPortConfig.prefixLists...)
+			if mergedInboundPrefixListsProvider == nil {
+				mergedInboundPrefixListsProvider = &cfg.ingKey
+				mergedInboundPrefixLists = cfgInboundPrefixLists
+			} else if !mergedInboundPrefixLists.Equal(cfgInboundPrefixLists) {
+				return listenPortConfig{}, errors.Errorf("conflicting inbound-prefix-lists, %v: %v | %v: %v",
+					*mergedInboundPrefixListsProvider, mergedInboundPrefixLists.List(), cfg.ingKey, cfgInboundPrefixLists.List())
+			}
+		}
+
 		if cfg.listenPortConfig.sslPolicy != nil {
 			if mergedSSLPolicyProvider == nil {
 				mergedSSLPolicyProvider = &cfg.ingKey
 				mergedSSLPolicy = cfg.listenPortConfig.sslPolicy
-			} else if awssdk.StringValue(mergedSSLPolicy) != awssdk.StringValue(cfg.listenPortConfig.sslPolicy) {
+			} else if awssdk.ToString(mergedSSLPolicy) != awssdk.ToString(cfg.listenPortConfig.sslPolicy) {
 				return listenPortConfig{}, errors.Errorf("conflicting sslPolicy, %v: %v | %v: %v",
-					*mergedSSLPolicyProvider, awssdk.StringValue(mergedSSLPolicy), cfg.ingKey, awssdk.StringValue(cfg.listenPortConfig.sslPolicy))
+					*mergedSSLPolicyProvider, awssdk.ToString(mergedSSLPolicy), cfg.ingKey, awssdk.ToString(cfg.listenPortConfig.sslPolicy))
 			}
 		}
 
@@ -338,9 +362,20 @@ func (t *defaultModelBuildTask) mergeListenPortConfigs(_ context.Context, listen
 			mergedTLSCertsSet.Insert(cert)
 			mergedTLSCerts = append(mergedTLSCerts, cert)
 		}
+
+		if cfg.listenPortConfig.mutualAuthentication != nil {
+			if mergedMtlsAttributesProvider == nil {
+				mergedMtlsAttributesProvider = &cfg.ingKey
+				mergedMtlsAttributes = cfg.listenPortConfig.mutualAuthentication
+			} else if !reflect.DeepEqual(mergedMtlsAttributes, cfg.listenPortConfig.mutualAuthentication) {
+				return listenPortConfig{}, errors.Errorf("conflicting mTLS Attributes, %v: %v | %v: %v",
+					*mergedMtlsAttributesProvider, mergedMtlsAttributes, cfg.ingKey, cfg.listenPortConfig.mutualAuthentication)
+			}
+		}
+
 	}
 
-	if len(mergedInboundCIDRv4s) == 0 && len(mergedInboundCIDRv6s) == 0 {
+	if len(mergedInboundCIDRv4s) == 0 && len(mergedInboundCIDRv6s) == 0 && len(mergedInboundPrefixLists) == 0 {
 		mergedInboundCIDRv4s.Insert("0.0.0.0/0")
 		mergedInboundCIDRv6s.Insert("::/0")
 	}
@@ -349,20 +384,22 @@ func (t *defaultModelBuildTask) mergeListenPortConfigs(_ context.Context, listen
 	}
 
 	return listenPortConfig{
-		protocol:       mergedProtocol,
-		inboundCIDRv4s: mergedInboundCIDRv4s.List(),
-		inboundCIDRv6s: mergedInboundCIDRv6s.List(),
-		sslPolicy:      mergedSSLPolicy,
-		tlsCerts:       mergedTLSCerts,
+		protocol:             mergedProtocol,
+		inboundCIDRv4s:       mergedInboundCIDRv4s.List(),
+		inboundCIDRv6s:       mergedInboundCIDRv6s.List(),
+		prefixLists:          mergedInboundPrefixLists.List(),
+		sslPolicy:            mergedSSLPolicy,
+		tlsCerts:             mergedTLSCerts,
+		mutualAuthentication: mergedMtlsAttributes,
 	}, nil
 }
 
 // buildSSLRedirectConfig computes the SSLRedirect config for the IngressGroup. Returns nil if there is no SSLRedirect configured.
-func (t *defaultModelBuildTask) buildSSLRedirectConfig(ctx context.Context, listenPortConfigByPort map[int64]listenPortConfig) (*SSLRedirectConfig, error) {
-	explicitSSLRedirectPorts := sets.Int64{}
+func (t *defaultModelBuildTask) buildSSLRedirectConfig(ctx context.Context, listenPortConfigByPort map[int32]listenPortConfig) (*SSLRedirectConfig, error) {
+	explicitSSLRedirectPorts := sets.Int32{}
 	for _, member := range t.ingGroup.Members {
-		var rawSSLRedirectPort int64
-		exists, err := t.annotationParser.ParseInt64Annotation(annotations.IngressSuffixSSLRedirect, &rawSSLRedirectPort, member.Ing.Annotations)
+		var rawSSLRedirectPort int32
+		exists, err := t.annotationParser.ParseInt32Annotation(annotations.IngressSuffixSSLRedirect, &rawSSLRedirectPort, member.Ing.Annotations)
 		if err != nil {
 			return nil, errors.Wrapf(err, "ingress: %v", k8s.NamespacedName(member.Ing))
 		}
@@ -386,7 +423,7 @@ func (t *defaultModelBuildTask) buildSSLRedirectConfig(ctx context.Context, list
 
 	return &SSLRedirectConfig{
 		SSLPort:    rawSSLRedirectPort,
-		StatusCode: elbv2sdk.RedirectActionStatusCodeEnumHttp301,
+		StatusCode: string(elbv2types.RedirectActionStatusCodeEnumHttp301),
 	}, nil
 }
 

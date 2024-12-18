@@ -8,7 +8,7 @@ import (
 	"regexp"
 	"strings"
 
-	awssdk "github.com/aws/aws-sdk-go/aws"
+	awssdk "github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/pkg/errors"
 	"sigs.k8s.io/aws-load-balancer-controller/pkg/algorithm"
 	"sigs.k8s.io/aws-load-balancer-controller/pkg/annotations"
@@ -64,18 +64,20 @@ func (t *defaultModelBuildTask) buildManagedSecurityGroupName(_ context.Context)
 
 func (t *defaultModelBuildTask) buildManagedSecurityGroupIngressPermissions(ctx context.Context, ipAddressType elbv2model.IPAddressType) ([]ec2model.IPPermission, error) {
 	var permissions []ec2model.IPPermission
-	cidrs, err := t.buildCIDRsFromSourceRanges(ctx, ipAddressType)
+	var prefixListIDs []string
+	prefixListsConfigured := t.annotationParser.ParseStringSliceAnnotation(annotations.SvcLBSuffixSecurityGroupPrefixLists, &prefixListIDs, t.service.Annotations)
+	cidrs, err := t.buildCIDRsFromSourceRanges(ctx, ipAddressType, prefixListsConfigured)
 	if err != nil {
 		return nil, err
 	}
 	for _, port := range t.service.Spec.Ports {
-		listenPort := int64(port.Port)
+		listenPort := int32(port.Port)
 		for _, cidr := range cidrs {
 			if !strings.Contains(cidr, ":") {
 				permissions = append(permissions, ec2model.IPPermission{
 					IPProtocol: strings.ToLower(string(port.Protocol)),
-					FromPort:   awssdk.Int64(listenPort),
-					ToPort:     awssdk.Int64(listenPort),
+					FromPort:   awssdk.Int32(listenPort),
+					ToPort:     awssdk.Int32(listenPort),
 					IPRanges: []ec2model.IPRange{
 						{
 							CIDRIP: cidr,
@@ -85,11 +87,25 @@ func (t *defaultModelBuildTask) buildManagedSecurityGroupIngressPermissions(ctx 
 			} else {
 				permissions = append(permissions, ec2model.IPPermission{
 					IPProtocol: strings.ToLower(string(port.Protocol)),
-					FromPort:   awssdk.Int64(listenPort),
-					ToPort:     awssdk.Int64(listenPort),
+					FromPort:   awssdk.Int32(listenPort),
+					ToPort:     awssdk.Int32(listenPort),
 					IPv6Range: []ec2model.IPv6Range{
 						{
 							CIDRIPv6: cidr,
+						},
+					},
+				})
+			}
+		}
+		if prefixListsConfigured {
+			for _, prefixID := range prefixListIDs {
+				permissions = append(permissions, ec2model.IPPermission{
+					IPProtocol: strings.ToLower(string(port.Protocol)),
+					FromPort:   awssdk.Int32(listenPort),
+					ToPort:     awssdk.Int32(listenPort),
+					PrefixLists: []ec2model.PrefixList{
+						{
+							ListID: prefixID,
 						},
 					},
 				})
@@ -99,7 +115,7 @@ func (t *defaultModelBuildTask) buildManagedSecurityGroupIngressPermissions(ctx 
 	return permissions, nil
 }
 
-func (t *defaultModelBuildTask) buildCIDRsFromSourceRanges(_ context.Context, ipAddressType elbv2model.IPAddressType) ([]string, error) {
+func (t *defaultModelBuildTask) buildCIDRsFromSourceRanges(_ context.Context, ipAddressType elbv2model.IPAddressType, prefixListsConfigured bool) ([]string, error) {
 	var cidrs []string
 	for _, cidr := range t.service.Spec.LoadBalancerSourceRanges {
 		cidrs = append(cidrs, cidr)
@@ -113,6 +129,9 @@ func (t *defaultModelBuildTask) buildCIDRsFromSourceRanges(_ context.Context, ip
 		}
 	}
 	if len(cidrs) == 0 {
+		if prefixListsConfigured {
+			return cidrs, nil
+		}
 		cidrs = append(cidrs, "0.0.0.0/0")
 		if ipAddressType == elbv2model.IPAddressTypeDualStack {
 			cidrs = append(cidrs, "::/0")

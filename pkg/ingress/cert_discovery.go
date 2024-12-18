@@ -2,14 +2,16 @@ package ingress
 
 import (
 	"context"
-	"github.com/aws/aws-sdk-go/aws"
-	"github.com/aws/aws-sdk-go/service/acm"
+	awssdk "github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/service/acm"
+	acmTypes "github.com/aws/aws-sdk-go-v2/service/acm/types"
 	"github.com/go-logr/logr"
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/go-cmp/cmp/cmpopts"
 	"github.com/pkg/errors"
 	"k8s.io/apimachinery/pkg/util/cache"
 	"k8s.io/apimachinery/pkg/util/sets"
+	"k8s.io/utils/strings/slices"
 	"sigs.k8s.io/aws-load-balancer-controller/pkg/aws/services"
 	"strings"
 	"sync"
@@ -33,7 +35,7 @@ type CertDiscovery interface {
 }
 
 // NewACMCertDiscovery constructs new acmCertDiscovery
-func NewACMCertDiscovery(acmClient services.ACM, logger logr.Logger) *acmCertDiscovery {
+func NewACMCertDiscovery(acmClient services.ACM, allowedCAARNs []string, logger logr.Logger) *acmCertDiscovery {
 	return &acmCertDiscovery{
 		acmClient: acmClient,
 		logger:    logger,
@@ -44,6 +46,7 @@ func NewACMCertDiscovery(acmClient services.ACM, logger logr.Logger) *acmCertDis
 		certDomainsCache:            cache.NewExpiring(),
 		importedCertDomainsCacheTTL: defaultImportedCertDomainsCacheTTL,
 		privateCertDomainsCacheTTL:  defaultPrivateCertDomainsCacheTTL,
+		allowedCAARNs:               allowedCAARNs,
 	}
 }
 
@@ -59,6 +62,7 @@ type acmCertDiscovery struct {
 	certARNsCache               *cache.Expiring
 	certARNsCacheTTL            time.Duration
 	certDomainsCache            *cache.Expiring
+	allowedCAARNs               []string
 	importedCertDomainsCacheTTL time.Duration
 	privateCertDomainsCacheTTL  time.Duration
 }
@@ -102,7 +106,10 @@ func (d *acmCertDiscovery) loadDomainsForAllCertificates(ctx context.Context) (m
 		if err != nil {
 			return nil, err
 		}
-		domainsByCertARN[certARN] = certDomains
+		if len(certDomains) > 0 {
+			domainsByCertARN[certARN] = certDomains
+		}
+
 	}
 	return domainsByCertARN, nil
 }
@@ -112,9 +119,9 @@ func (d *acmCertDiscovery) loadAllCertificateARNs(ctx context.Context) ([]string
 		return rawCacheItem.([]string), nil
 	}
 	req := &acm.ListCertificatesInput{
-		CertificateStatuses: aws.StringSlice([]string{acm.CertificateStatusIssued}),
-		Includes: &acm.Filters{
-			KeyTypes: aws.StringSlice(acm.KeyAlgorithm_Values()),
+		CertificateStatuses: []acmTypes.CertificateStatus{acmTypes.CertificateStatusIssued},
+		Includes: &acmTypes.Filters{
+			KeyTypes: acmTypes.KeyAlgorithm.Values(""),
 		},
 	}
 	certSummaries, err := d.acmClient.ListCertificatesAsList(ctx, req)
@@ -124,7 +131,7 @@ func (d *acmCertDiscovery) loadAllCertificateARNs(ctx context.Context) ([]string
 
 	var certARNs []string
 	for _, certSummary := range certSummaries {
-		certARN := aws.StringValue(certSummary.CertificateArn)
+		certARN := awssdk.ToString(certSummary.CertificateArn)
 		certARNs = append(certARNs, certARN)
 	}
 	d.certARNsCache.Set(certARNsCacheKey, certARNs, d.certARNsCacheTTL)
@@ -136,18 +143,24 @@ func (d *acmCertDiscovery) loadDomainsForCertificate(ctx context.Context, certAR
 		return rawCacheItem.(sets.String), nil
 	}
 	req := &acm.DescribeCertificateInput{
-		CertificateArn: aws.String(certARN),
+		CertificateArn: awssdk.String(certARN),
 	}
 	resp, err := d.acmClient.DescribeCertificateWithContext(ctx, req)
 	if err != nil {
 		return nil, err
 	}
 	certDetail := resp.Certificate
-	domains := sets.NewString(aws.StringValueSlice(certDetail.SubjectAlternativeNames)...)
-	switch aws.StringValue(certDetail.Type) {
-	case acm.CertificateTypeImported:
+
+	// check if cert is issued from an allowed CA
+	// otherwise empty-out the list of domains
+	domains := sets.String{}
+	if len(d.allowedCAARNs) == 0 || slices.Contains(d.allowedCAARNs, awssdk.ToString(certDetail.CertificateAuthorityArn)) {
+		domains = sets.NewString(certDetail.SubjectAlternativeNames...)
+	}
+	switch certDetail.Type {
+	case acmTypes.CertificateTypeImported:
 		d.certDomainsCache.Set(certARN, domains, d.importedCertDomainsCacheTTL)
-	case acm.CertificateTypeAmazonIssued, acm.CertificateTypePrivate:
+	case acmTypes.CertificateTypeAmazonIssued, acmTypes.CertificateTypePrivate:
 		d.certDomainsCache.Set(certARN, domains, d.privateCertDomainsCacheTTL)
 	}
 	return domains, nil
