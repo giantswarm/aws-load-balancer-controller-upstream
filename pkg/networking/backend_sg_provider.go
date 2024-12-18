@@ -6,7 +6,6 @@ import (
 	"encoding/hex"
 	"fmt"
 	"regexp"
-	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -255,38 +254,31 @@ func (p *defaultBackendSGProvider) allocateBackendSG(ctx context.Context, resour
 }
 
 func (p *defaultBackendSGProvider) buildBackendSGTags(_ context.Context, additionalTags map[string]string) []ec2types.TagSpecification {
-	var tags []ec2types.Tag
+	tags := make(map[string]string)
+
 	for key, val := range p.defaultTags {
-		tags = append(tags, ec2types.Tag{
-			Key:   awssdk.String(key),
-			Value: awssdk.String(val),
-		})
+		tags[key] = val
 	}
 
 	for key, val := range additionalTags {
-		tags = append(tags, ec2types.Tag{
+		tags[key] = val
+	}
+
+	tags[tagKeyK8sCluster] = p.clusterName
+	tags[tagKeyResource] = tagValueBackend
+
+	var ec2Tags []ec2types.Tag
+	for key, val := range tags {
+		ec2Tags = append(ec2Tags, ec2types.Tag{
 			Key:   awssdk.String(key),
 			Value: awssdk.String(val),
 		})
 	}
-
-	sort.Slice(tags, func(i, j int) bool {
-		return awssdk.ToString(tags[i].Key) < awssdk.ToString(tags[j].Key)
-	})
 
 	return []ec2types.TagSpecification{
 		{
 			ResourceType: resourceTypeSecurityGroup,
-			Tags: append(tags, []ec2types.Tag{
-				{
-					Key:   awssdk.String(tagKeyK8sCluster),
-					Value: awssdk.String(p.clusterName),
-				},
-				{
-					Key:   awssdk.String(tagKeyResource),
-					Value: awssdk.String(tagValueBackend),
-				},
-			}...),
+			Tags:         ec2Tags,
 		},
 	}
 }
